@@ -1,0 +1,4 @@
+chromium_revision=db64a84f93f16f8de53fee8d33df0a31473efefb
+chromium_version=146.0.7633.0
+source_layout=vendor/chromium/src
+scope=cronet-filtered-build-closure

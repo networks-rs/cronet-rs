@@ -1,0 +1,80 @@
+name: Cronet source builds
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  source-native:
+    name: ${{ matrix.target }} source build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Synchronize only the pinned Cronet source closure
+        run: cargo xtask sync
+      - name: Build shared and static Cronet from source
+        run: cargo xtask build --release --linkage both --target ${{ matrix.target }}
+      - name: Test static source linkage
+        shell: bash
+        run: |
+          export CRONET_SOURCE_DIR="$PWD/.cronet/chromium/src"
+          export CRONET_LIB_DIR="$CRONET_SOURCE_DIR/out/cronet-rs"
+          export MACOSX_DEPLOYMENT_TARGET=12.0
+          cargo test -p cronet --features static,native-tests --test e2e_local --test native_smoke -- --test-threads=1
+      - name: Test shared source linkage
+        shell: bash
+        run: |
+          export CRONET_SOURCE_DIR="$PWD/.cronet/chromium/src"
+          export CRONET_LIB_DIR="$CRONET_SOURCE_DIR/out/cronet-rs"
+          export MACOSX_DEPLOYMENT_TARGET=12.0
+          export PATH="$CRONET_LIB_DIR:$PATH"
+          export LD_LIBRARY_PATH="$CRONET_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export DYLD_LIBRARY_PATH="$CRONET_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          cargo test -p cronet --features native-tests --test e2e_local --test native_smoke -- --test-threads=1
+      - name: Require public HTTP/2 and QUIC protocols
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          export CRONET_SOURCE_DIR="$PWD/.cronet/chromium/src"
+          export CRONET_LIB_DIR="$CRONET_SOURCE_DIR/out/cronet-rs"
+          export LD_LIBRARY_PATH="$CRONET_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export CRONET_E2E_REQUIRE_QUIC=1
+          cargo test -p cronet --features network-tests --test e2e_network -- --test-threads=1
+
+  publish-check:
+    name: Rust source crate publication check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Check crate contents and metadata
+        run: cargo package --workspace --allow-dirty --no-verify

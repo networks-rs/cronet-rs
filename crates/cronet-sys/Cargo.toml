@@ -1,0 +1,24 @@
+[package]
+name = "cronet-sys"
+description = "Raw bindings to Chromium Cronet's native C API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+links = "cronet"
+build = "build.rs"
+include = ["Cargo.toml", "build.rs", "src/**/*.rs", "wrapper.h"]
+
+[build-dependencies]
+bindgen = "0.72"
+cronet-src = { path = "../../xtask", version = "0.1.0" }
+
+[features]
+# Shared linking is the default. Enabling `static` takes precedence and links
+# the complete Cronet archive from the same target-specific package.
+default = []
+static = []
+
+[lints]
+workspace = true

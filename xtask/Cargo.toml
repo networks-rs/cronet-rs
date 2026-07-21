@@ -1,0 +1,21 @@
+[package]
+name = "cronet-src"
+description = "Pinned Cronet source and native build support for cronet-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+autobins = false
+include = ["Cargo.toml", "README.md", "SOURCE.lock", "filter_deps.py", "src/**/*.rs", "vendor/**"]
+
+[lib]
+name = "cronet_src"
+path = "src/main.rs"
+
+[[bin]]
+name = "xtask"
+path = "src/bin/xtask.rs"
+
+[lints]
+workspace = true
