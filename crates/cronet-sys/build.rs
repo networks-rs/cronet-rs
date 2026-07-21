@@ -8,9 +8,18 @@ const SOURCE_ENV: &str = "CRONET_SOURCE_DIR";
 const LIB_ENV: &str = "CRONET_LIB_DIR";
 const CACHE_ENV: &str = "CRONET_CACHE_DIR";
 const NO_LINK_ENV: &str = "CRONET_SYS_NO_LINK";
+const OHOS_SDK_NATIVE_ENV: &str = "OHOS_SDK_NATIVE";
 
 fn main() {
-    for variable in [SOURCE_ENV, LIB_ENV, CACHE_ENV, NO_LINK_ENV] {
+    for variable in [
+        SOURCE_ENV,
+        LIB_ENV,
+        CACHE_ENV,
+        NO_LINK_ENV,
+        OHOS_SDK_NATIVE_ENV,
+        "OHOS_NDK_HOME",
+        "RUSTC",
+    ] {
         println!("cargo:rerun-if-env-changed={variable}");
     }
     println!("cargo:rerun-if-changed=wrapper.h");

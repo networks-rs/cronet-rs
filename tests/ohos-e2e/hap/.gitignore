@@ -1,0 +1,9 @@
+/.hvigor/
+/.ohos-sign/
+/build/
+/entry/.cxx/
+/entry/build/
+/entry/libs/
+/oh_modules/
+/**/oh-package-lock.json5
+

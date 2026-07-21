@@ -16,6 +16,7 @@ functions to safe callers.
 | Static linking | Additive `static` feature builds and links the complete archive from source | Source-linked static native E2E on every target |
 | Portable static archive | The build folds the GN thin archive, Chromium Rust rlibs, CXX bridge, libc++, and libc++abi into one regular archive; GN-derived system libraries/frameworks remain explicit | Static source link and E2E |
 | Source delivery | `cronet-src::Build` prefers an explicit or vendored tree and otherwise materializes the pinned, filtered source cache; it never downloads a native library | Source-selection unit tests and six-target CI |
+| OpenHarmony source build | The same builder discovers a caller-selected Native SDK and supports ARMv7, ARM64, and x86-64 without assuming a DevEco installation path | Shared/static build matrix for all three targets; application-level ARM64 QEMU E2E |
 
 ## Engine and configuration
 
@@ -114,5 +115,8 @@ unsafe native-test code.
 - `network-tests` additionally runs a real TLS HTTP/2 full-duplex exchange and
   an HTTP/3/QUIC exchange. Networks may block UDP; setting
   `CRONET_E2E_REQUIRE_QUIC=1` turns QUIC fallback into a failure.
-- Every source-build target runs the deterministic suite. Linux x86-64 also
-  runs a protocol gate with `CRONET_E2E_REQUIRE_QUIC=1`.
+- Every desktop source-build CI target runs the deterministic suite. Linux
+  x86-64 also runs a protocol gate with `CRONET_E2E_REQUIRE_QUIC=1`.
+- OpenHarmony runs the same safe API through a minimal HAP with the Internet
+  permission. The portable harness is in `tests/ohos-e2e`; ARMv7 and x86-64
+  remain build-verified until matching runtime images are available.

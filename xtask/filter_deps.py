@@ -26,6 +26,12 @@ def source_value(source: str, assignment: ast.Assign) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--unconditional",
+        action="append",
+        default=[],
+        help="selected dependency whose upstream condition must be omitted",
+    )
     parser.add_argument("input", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("allow", nargs="+")
@@ -63,6 +69,27 @@ def main() -> None:
             continue
         key = ast.get_source_segment(source, key_node)
         value = ast.get_source_segment(source, value_node)
+        if key_node.value in args.unconditional:
+            if not isinstance(value_node, ast.Dict):
+                raise ValueError(
+                    f"cannot remove a condition from non-dictionary dependency "
+                    f"{key_node.value}"
+                )
+            entries: list[str] = []
+            for child_key, child_value in zip(value_node.keys, value_node.values):
+                if (
+                    isinstance(child_key, ast.Constant)
+                    and child_key.value == "condition"
+                ):
+                    continue
+                child_key_source = ast.get_source_segment(source, child_key)
+                child_value_source = ast.get_source_segment(source, child_value)
+                if child_key_source is None or child_value_source is None:
+                    raise ValueError(
+                        f"could not recover dependency field for {key_node.value}"
+                    )
+                entries.append(f"    {child_key_source}: {child_value_source},")
+            value = "{\n" + "\n".join(entries) + "\n  }"
         if key is None or value is None:
             raise ValueError(f"could not recover dependency {key_node.value}")
         selected.append((key, value))

@@ -14,6 +14,12 @@ complete source tree, and compiles Cronet. Source selection is:
 No prebuilt Cronet library is downloaded or accepted. `CRONET_CACHE_DIR`
 changes the persistent source cache location.
 
+For OpenHarmony, select a complete Native SDK with
+`Build::ohos_sdk_native`, `OHOS_SDK_NATIVE`, or `OHOS_NDK_HOME`. The builder
+supports `armv7-unknown-linux-ohos`, `aarch64-unknown-linux-ohos`, and
+`x86_64-unknown-linux-ohos`. SDK runtime locations are discovered below that
+explicit root by target triple; no DevEco Studio path is assumed.
+
 The complete filtered Chromium build closure is several GiB unpacked, so a
 fully vendored edition must be distributed from the dedicated source
 repository or a Cargo registry configured for large packages. The Rust wrapper

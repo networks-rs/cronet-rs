@@ -40,7 +40,7 @@ equally to Git, CIPD, and GCS dependencies. `gclient` still downloads the
 third-party repositories and toolchains that the Cronet target actually needs;
 a source build cannot consist of `components/cronet` alone because Cronet
 depends on Chromium `base`, `net`, BoringSSL, QUICHE, and other libraries.
-At the pinned revision this selects 29 of Chromium's 421 dependency entries
+At the pinned revision this selects 30 of Chromium's 421 dependency entries
 (the host platform then narrows that set further).
 
 To download only the C headers for binding generation and IDE checks:
@@ -86,6 +86,30 @@ The source-build workflow verifies these native targets:
 | Linux | x86-64, ARM64 | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` |
 | macOS | x86-64, Apple Silicon | `x86_64-apple-darwin`, `aarch64-apple-darwin` |
 | Windows | x86-64, ARM64 | `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` |
+| OpenHarmony | ARMv7, ARM64, x86-64 | `armv7-unknown-linux-ohos`, `aarch64-unknown-linux-ohos`, `x86_64-unknown-linux-ohos` |
+
+OpenHarmony builds use the same source builder and do not depend on a DevEco
+Studio installation layout. Install the corresponding Rust standard library,
+then provide any complete OpenHarmony Native SDK root either through
+`Build::ohos_sdk_native`, `OHOS_SDK_NATIVE`, or `OHOS_NDK_HOME`:
+
+```sh
+rustup target add aarch64-unknown-linux-ohos
+OHOS_SDK_NATIVE=/path/to/openharmony/native \
+  cargo xtask build --release --linkage both \
+    --target aarch64-unknown-linux-ohos
+```
+
+The builder discovers the selected SDK's sysroot, Clang resource directory,
+compiler builtins, and unwind archive from their target triples. It does not
+scan host-specific IDE directories or invoke the SDK compiler. Chromium's
+pinned Clang, LLD, libc++, and libc++abi build the source; the supplied SDK
+provides only the target OS headers and ABI runtime archives.
+
+The application-level QEMU/device harness is documented in
+[`tests/ohos-e2e`](tests/ohos-e2e/README.md). Its SDK, HDC, Hvigor, signer,
+device, and source/output locations are all injected; the repository contains
+no emulator image or host installation path.
 
 The complete filtered source closure is approximately 3.7 GiB unpacked. A
 normal crates.io package cannot embed it because crates.io limits a `.crate`
