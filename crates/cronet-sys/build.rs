@@ -18,6 +18,12 @@ fn main() {
         NO_LINK_ENV,
         OHOS_SDK_NATIVE_ENV,
         "OHOS_NDK_HOME",
+        "ANDROID_NDK_HOME",
+        "ANDROID_NDK_ROOT",
+        "NDK_HOME",
+        "ANDROID_API_LEVEL",
+        "DEVELOPER_DIR",
+        "IPHONEOS_DEPLOYMENT_TARGET",
         "RUSTC",
     ] {
         println!("cargo:rerun-if-env-changed={variable}");
@@ -204,6 +210,15 @@ fn emit_link(lib_dir: &Path, root: &Path, linkage: cronet_src::NativeLinkage) {
         );
     }
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    for entry in fs::read_dir(lib_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+    {
+        println!("cargo:rerun-if-changed={}", entry.display());
+    }
     match linkage {
         cronet_src::NativeLinkage::Dynamic => {
             println!("cargo:rustc-link-lib=dylib={}", dynamic_link_name(lib_dir));
@@ -216,6 +231,28 @@ fn emit_link(lib_dir: &Path, root: &Path, linkage: cronet_src::NativeLinkage) {
     println!("cargo:root={}", root.display());
     println!("cargo:libdir={}", lib_dir.display());
     println!("cargo:linkage={}", linkage.as_str());
+    if env::var("TARGET").is_ok_and(|target| target.contains("android")) {
+        let support_jar = lib_dir.join("cronet-android-support.jar");
+        assert!(
+            support_jar.is_file(),
+            "Cronet Android support jar not found at {}",
+            support_jar.display()
+        );
+        // Cargo exposes this to immediate dependants as
+        // DEP_CRONET_ANDROID_SUPPORT_JAR. Android packaging tools must dex the
+        // jar because native Chromium networking uses Android Java services.
+        println!("cargo:android_support_jar={}", support_jar.display());
+        let support_dex_jar = lib_dir.join("cronet-android-support.dex.jar");
+        assert!(
+            support_dex_jar.is_file(),
+            "Cronet Android support dex jar not found at {}",
+            support_dex_jar.display()
+        );
+        println!(
+            "cargo:android_support_dex_jar={}",
+            support_dex_jar.display()
+        );
+    }
 }
 
 fn dynamic_link_name(lib_dir: &Path) -> String {
@@ -247,6 +284,11 @@ fn emit_static_link_requirements(lib_dir: &Path) {
         if let Some(library) = line.strip_prefix("lib=") {
             let library = library.strip_suffix(".lib").unwrap_or(library);
             println!("cargo:rustc-link-lib={library}");
+        } else if let Some(name) = line.strip_prefix("linker-script=") {
+            // The .so-named input contains an lld script, not an ELF shared
+            // object. Passing it through -l makes this requirement propagate
+            // from cronet-sys to the final Cargo link without a runtime dep.
+            println!("cargo:rustc-link-lib=dylib={name}");
         } else if let Some(framework) = line.strip_prefix("framework=") {
             println!("cargo:rustc-link-lib=framework={framework}");
         } else {

@@ -40,8 +40,8 @@ equally to Git, CIPD, and GCS dependencies. `gclient` still downloads the
 third-party repositories and toolchains that the Cronet target actually needs;
 a source build cannot consist of `components/cronet` alone because Cronet
 depends on Chromium `base`, `net`, BoringSSL, QUICHE, and other libraries.
-At the pinned revision this selects 30 of Chromium's 421 dependency entries
-(the host platform then narrows that set further).
+At the pinned revision this selects 74 of Chromium's 421 dependency entries
+before the host and target conditions narrow the set further.
 
 To download only the C headers for binding generation and IDE checks:
 
@@ -85,6 +85,8 @@ The source-build workflow verifies these native targets:
 | --- | --- | --- |
 | Linux | x86-64, ARM64 | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` |
 | macOS | x86-64, Apple Silicon | `x86_64-apple-darwin`, `aarch64-apple-darwin` |
+| Android | x86, x86-64, ARMv7, ARM64 | `i686-linux-android`, `x86_64-linux-android`, `armv7-linux-androideabi`, `aarch64-linux-android` |
+| iOS | x86-64 Simulator, ARM64 Simulator/device | `x86_64-apple-ios`, `aarch64-apple-ios-sim`, `aarch64-apple-ios` |
 | Windows | x86-64, ARM64 | `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` |
 | OpenHarmony | ARMv7, ARM64, x86-64 | `armv7-unknown-linux-ohos`, `aarch64-unknown-linux-ohos`, `x86_64-unknown-linux-ohos` |
 
@@ -110,6 +112,22 @@ The application-level QEMU/device harness is documented in
 [`tests/ohos-e2e`](tests/ohos-e2e/README.md). Its SDK, HDC, Hvigor, signer,
 device, and source/output locations are all injected; the repository contains
 no emulator image or host installation path.
+
+Android source builds discover a standard NDK through `ANDROID_NDK_HOME`,
+`ANDROID_NDK_ROOT`, or `NDK_HOME` and default to API 23. The generated output
+contains the C library plus the minimal Java support JAR and pre-dexed JAR
+needed by Chromium's Android proxy, certificate, and network-change bridges.
+Static consumers initialize Cronet's Java VM from their final `JNI_OnLoad` via
+`cronet::android::initialize_java_vm`; the repository's application harness
+shows the complete packaging path.
+
+iOS source builds require macOS and Xcode. They support the ARM64 device target
+and both Rust Simulator targets, use relocatable `@rpath` install names for the
+shared library, and propagate every required Apple framework for static mode.
+Chromium 146 defaults to iOS 17 for this non-Blink build; override it through
+`IPHONEOS_DEPLOYMENT_TARGET` or `cronet_src::Build::ios_deployment_target`.
+Dynamic and static Android/iOS application tests are documented in
+[`tests/mobile-e2e`](tests/mobile-e2e/README.md).
 
 The complete filtered source closure is approximately 3.7 GiB unpacked. A
 normal crates.io package cannot embed it because crates.io limits a `.crate`
@@ -229,9 +247,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 The safe layer owns the engine, Tokio executor, callback contexts, requests,
-upload providers, listeners, and reusable Cronet buffers. No raw pointer or
-`unsafe` function is public. The engine must be built inside a Tokio runtime;
-it is cloneable, `Send + Sync`, and can be shared by normal Tokio tasks.
+upload providers, listeners, and reusable Cronet buffers. Its networking API
+does not expose raw pointers or unsafe operations. The sole platform boundary
+is static Android embedding: `cronet::android::initialize_java_vm` is unsafe
+because the application must forward the process `JavaVM*` from `JNI_OnLoad`.
+The engine must be built inside a Tokio runtime; it is cloneable, `Send + Sync`,
+and can be shared by normal Tokio tasks.
 
 `Engine::send` resolves when response headers arrive and returns a bounded
 `ResponseBody`. The body implements both

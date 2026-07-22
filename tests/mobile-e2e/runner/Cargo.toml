@@ -1,0 +1,18 @@
+[package]
+name = "cronet-mobile-e2e-runner"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+cronet = { path = "../../../crates/cronet" }
+tokio = { version = "1.44", features = ["io-util", "rt-multi-thread", "sync", "time"] }
+
+[features]
+static = ["cronet/static"]
+
+[workspace]

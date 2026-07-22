@@ -11,6 +11,8 @@ pub const CHROMIUM_VERSION: &str = "146.0.7633.0";
 const CHROMIUM_URL: &str = "https://chromium.googlesource.com/chromium/src.git";
 const DEPOT_TOOLS_URL: &str = "https://chromium.googlesource.com/chromium/tools/depot_tools.git";
 const OHOS_SDK_NATIVE_ENV: &str = "OHOS_SDK_NATIVE";
+const ANDROID_NDK_HOME_ENV: &str = "ANDROID_NDK_HOME";
+const ANDROID_API_LEVEL_ENV: &str = "ANDROID_API_LEVEL";
 
 /// Native library form selected by `cronet-sys` or the workspace CLI.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +55,10 @@ pub struct Build {
     linkage: NativeLinkage,
     ohos_sdk_native: Option<PathBuf>,
     rust_sysroot: Option<PathBuf>,
+    android_ndk: Option<PathBuf>,
+    android_api_level: Option<u32>,
+    ios_developer_dir: Option<PathBuf>,
+    ios_deployment_target: Option<String>,
 }
 
 impl Default for Build {
@@ -70,6 +76,10 @@ impl Build {
             linkage: NativeLinkage::Dynamic,
             ohos_sdk_native: None,
             rust_sysroot: None,
+            android_ndk: None,
+            android_api_level: None,
+            ios_developer_dir: None,
+            ios_deployment_target: None,
         }
     }
 
@@ -105,6 +115,34 @@ impl Build {
         self
     }
 
+    /// Selects an Android NDK root. If unset, `ANDROID_NDK_HOME`,
+    /// `ANDROID_NDK_ROOT`, or `NDK_HOME` is used for Android targets.
+    pub fn android_ndk(&mut self, directory: impl Into<PathBuf>) -> &mut Self {
+        self.android_ndk = Some(directory.into());
+        self
+    }
+
+    /// Selects the Android API level used by the native library. Cronet's
+    /// pinned minimum, API 23, is the default.
+    pub const fn android_api_level(&mut self, api_level: u32) -> &mut Self {
+        self.android_api_level = Some(api_level);
+        self
+    }
+
+    /// Selects an Xcode Developer directory for iOS builds. If unset, the
+    /// standard `DEVELOPER_DIR`/`xcode-select` discovery is used.
+    pub fn ios_developer_dir(&mut self, directory: impl Into<PathBuf>) -> &mut Self {
+        self.ios_developer_dir = Some(directory.into());
+        self
+    }
+
+    /// Overrides Chromium's pinned iOS deployment target. If unset,
+    /// `IPHONEOS_DEPLOYMENT_TARGET` or Chromium's default is used.
+    pub fn ios_deployment_target(&mut self, version: impl Into<String>) -> &mut Self {
+        self.ios_deployment_target = Some(version.into());
+        self
+    }
+
     pub fn build(&mut self) -> Result<Artifacts, String> {
         let target = self
             .target
@@ -121,8 +159,14 @@ impl Build {
             &source_dir,
             target,
             self.linkage,
-            self.ohos_sdk_native.as_deref(),
-            self.rust_sysroot.as_deref(),
+            PlatformConfig {
+                ohos_sdk_native: self.ohos_sdk_native.as_deref(),
+                rust_sysroot: self.rust_sysroot.as_deref(),
+                android_ndk: self.android_ndk.as_deref(),
+                android_api_level: self.android_api_level,
+                ios_developer_dir: self.ios_developer_dir.as_deref(),
+                ios_deployment_target: self.ios_deployment_target.as_deref(),
+            },
         )?;
         Ok(Artifacts {
             source_dir,
@@ -230,7 +274,7 @@ fn usage() {
     println!(
         "cronet-rs workspace helper\n\n\
          usage:\n\
-           cargo xtask sync [--api-only] [--source-dir PATH]\n\
+           cargo xtask sync [--api-only] [--target TARGET] [--source-dir PATH]\n\
            cargo xtask build [--release] [--linkage dynamic|static|both] [--target TARGET] [--source-dir PATH] [--gn-arg ARG]...\n\
            cargo xtask vendor-source [--source-dir PATH] [--output PATH]\n\
            cargo xtask doctor [--source-dir PATH]\n\
@@ -252,15 +296,24 @@ pub fn ensure_native_from_source(
     target: &str,
     linkage: NativeLinkage,
 ) -> Result<PathBuf, String> {
-    ensure_native_from_source_configured(source, target, linkage, None, None)
+    ensure_native_from_source_configured(source, target, linkage, PlatformConfig::default())
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PlatformConfig<'a> {
+    ohos_sdk_native: Option<&'a Path>,
+    rust_sysroot: Option<&'a Path>,
+    android_ndk: Option<&'a Path>,
+    android_api_level: Option<u32>,
+    ios_developer_dir: Option<&'a Path>,
+    ios_deployment_target: Option<&'a str>,
 }
 
 fn ensure_native_from_source_configured(
     source: &Path,
     target: &str,
     linkage: NativeLinkage,
-    ohos_sdk_native: Option<&Path>,
-    rust_sysroot: Option<&Path>,
+    platform: PlatformConfig<'_>,
 ) -> Result<PathBuf, String> {
     let header = source.join("components/cronet/native/include/cronet_c.h");
     let bidirectional_header =
@@ -273,13 +326,17 @@ fn ensure_native_from_source_configured(
     }
 
     if !source_tree_buildable(source) {
-        sync(&["--source-dir".into(), source.as_os_str().to_owned()])?;
+        sync(&[
+            "--source-dir".into(),
+            source.as_os_str().to_owned(),
+            "--target".into(),
+            target.into(),
+        ])?;
     }
     build_native(
         BuildOptions {
             common: CommonOptions {
                 source_dir: source.to_owned(),
-                api_only: false,
             },
             release: true,
             target: Some(target.to_owned()),
@@ -289,8 +346,7 @@ fn ensure_native_from_source_configured(
             },
             gn_args: Vec::new(),
         },
-        ohos_sdk_native,
-        rust_sysroot,
+        platform,
     )?;
     Ok(native_output_dir(source, Some(target)))
 }
@@ -317,7 +373,7 @@ pub fn native_target_supported(target: &str) -> bool {
 }
 
 fn sync(args: &[std::ffi::OsString]) -> Result<(), String> {
-    let options = CommonOptions::parse(args, true)?;
+    let options = SyncOptions::parse(args)?;
     // Commands below change their working directory to the Chromium root.
     // Resolve a caller-provided relative path first so tool entry points remain
     // valid on every host, independent of where the cache is located.
@@ -341,9 +397,7 @@ fn sync(args: &[std::ffi::OsString]) -> Result<(), String> {
 
     let depot_tools = depot_tools_dir(&source)?;
     clone_or_update_depot_tools(&depot_tools)?;
-    write_gclient(chromium_root)?;
-    write_cronet_overlay(&source)?;
-
+    write_gclient(chromium_root, options.target.as_deref())?;
     let gclient = depot_tools.join(if cfg!(windows) {
         "gclient.bat"
     } else {
@@ -384,14 +438,11 @@ fn sync(args: &[std::ffi::OsString]) -> Result<(), String> {
 
 fn build(args: &[std::ffi::OsString]) -> Result<(), String> {
     let options = BuildOptions::parse(args)?;
-    build_native(options, None, None)
+    build_native(options, PlatformConfig::default())
 }
 
-fn build_native(
-    options: BuildOptions,
-    ohos_sdk_native: Option<&Path>,
-    rust_sysroot: Option<&Path>,
-) -> Result<(), String> {
+#[allow(clippy::too_many_lines)] // Native GN configuration and packaging form one atomic build transaction.
+fn build_native(options: BuildOptions, platform: PlatformConfig<'_>) -> Result<(), String> {
     let source = options
         .common
         .source_dir
@@ -408,7 +459,7 @@ fn build_native(
     require_file(&ninja, "run `cargo xtask sync` (without --api-only) first")?;
 
     let out_dir = native_output_dir(&source, options.target.as_deref());
-    let overlay = write_cronet_overlay(&source)?;
+    let overlay = write_cronet_overlay(&source, options.target.as_deref())?;
     let overlay_out_dir = native_output_dir(&overlay, options.target.as_deref());
     let mut gn_args = vec![
         format!("is_debug={}", !options.release),
@@ -429,7 +480,25 @@ fn build_native(
     if let Some(target) = options.target.as_deref() {
         gn_args.extend(gn_target_args(target)?);
         if is_ohos_target(target) {
-            gn_args.extend(ohos_gn_args(target, ohos_sdk_native, rust_sysroot)?);
+            gn_args.extend(ohos_gn_args(
+                target,
+                platform.ohos_sdk_native,
+                platform.rust_sysroot,
+            )?);
+        } else if is_android_target(target) {
+            gn_args.extend(android_gn_args(
+                &source,
+                &overlay,
+                target,
+                platform.android_ndk,
+                platform.android_api_level,
+            )?);
+        } else if is_ios_target(target) {
+            gn_args.extend(ios_gn_args(
+                target,
+                platform.ios_developer_dir,
+                platform.ios_deployment_target,
+            )?);
         }
     }
     gn_args.extend(options.gn_args);
@@ -459,7 +528,44 @@ fn build_native(
     for linkage in options.linkage.linkages() {
         ninja_command.arg(linkage.ninja_target());
     }
+    if options.linkage.linkages().contains(&NativeLinkage::Static) {
+        // A GN static_library records these runtime archives as final-link
+        // inputs without making them build dependencies. We package them into
+        // Cronet's complete archive, so request fresh target-ABI copies rather
+        // than accidentally reusing artifacts from an older GN configuration.
+        let extension = if options
+            .target
+            .as_deref()
+            .is_some_and(|target| target.contains("windows"))
+        {
+            "lib"
+        } else {
+            "a"
+        };
+        ninja_command.arg(format!(
+            "obj/buildtools/third_party/libc++/libc++.{extension}"
+        ));
+        ninja_command.arg(format!(
+            "obj/buildtools/third_party/libc++abi/libc++abi.{extension}"
+        ));
+    }
+    if options.target.as_deref().is_some_and(is_android_target) {
+        // The output directory is shared with the pinned checkout through an
+        // overlay symlink. Chromium's Java helpers otherwise canonicalize it
+        // back to the checkout and select its host CIPD JDK. Keep all action
+        // paths rooted in the generated overlay where host-tool substitutions
+        // are isolated.
+        ninja_command.env("CHECKOUT_SOURCE_ROOT", &overlay);
+        // Android's system proxy, certificate verification and network-change
+        // implementations are Java-backed even when Cronet is consumed only
+        // through its native C API. Ship their minimal transitive runtime next
+        // to the native library so Android applications can dex it.
+        ninja_command.arg(":cronet_rs_android_support_java");
+    }
     run_command(&mut ninja_command, "compile Cronet from source")?;
+    if options.target.as_deref().is_some_and(is_android_target) {
+        install_android_support_dex(&overlay_out_dir, &out_dir)?;
+    }
     if options.linkage.linkages().contains(&NativeLinkage::Static) {
         bundle_static_archive(&source, &out_dir)?;
         write_static_link_manifest(
@@ -484,6 +590,20 @@ fn build_native(
     );
     print_env_for_output(&source, &out_dir, options.target.as_deref());
     Ok(())
+}
+
+fn install_android_support_dex(build_dir: &Path, output_dir: &Path) -> Result<(), String> {
+    let source = build_dir.join("obj/cronet_rs_android_support_java.dex.jar");
+    require_file(
+        &source,
+        "build the Cronet Android support Java target first",
+    )?;
+    let contents = fs::read(&source).map_err(display_error("read Android support dex jar"))?;
+    write_if_changed(
+        &output_dir.join("cronet-android-support.dex.jar"),
+        &contents,
+        "install Android support dex jar",
+    )
 }
 
 fn bundle_static_archive(source: &Path, output_dir: &Path) -> Result<(), String> {
@@ -570,7 +690,31 @@ fn bundle_static_archive(source: &Path, output_dir: &Path) -> Result<(), String>
         fs::remove_file(&bundled).map_err(display_error("replace Cronet static archive"))?;
     }
     fs::rename(&temporary, &bundled).map_err(display_error("install Cronet static archive"))?;
-    Ok(())
+
+    // A Rust application supplies its own panic personality. Chromium's
+    // private Rust standard library exports the same C symbol from inside the
+    // complete native archive; give that internal copy a private namespace so
+    // the two toolchains can coexist in one final Rust link.
+    let llvm_objcopy = source
+        .join("third_party/llvm-build/Release+Asserts/bin")
+        .join(if cfg!(windows) {
+            "llvm-objcopy.exe"
+        } else {
+            "llvm-objcopy"
+        });
+    require_file(&llvm_objcopy, "run `cargo xtask sync` first")?;
+    check_status(
+        Command::new(llvm_objcopy)
+            .arg("--redefine-sym=rust_eh_personality=cronet_rs_chromium_rust_eh_personality")
+            // Mach-O object symbols carry the platform C underscore in the
+            // object table, unlike ELF/COFF. llvm-objcopy quietly ignores a
+            // missing spelling, so applying both keeps the archive portable.
+            .arg("--redefine-sym=_rust_eh_personality=_cronet_rs_chromium_rust_eh_personality")
+            .arg(&bundled)
+            .status()
+            .map_err(display_error("start llvm-objcopy for the static archive"))?,
+        "isolate Chromium's Rust panic personality",
+    )
 }
 
 fn native_static_archive_name(stem: &str) -> String {
@@ -613,9 +757,31 @@ fn write_static_link_manifest(
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
-        manifest.push_str("lib=");
-        manifest.push_str(library);
-        manifest.push('\n');
+        if Path::new(library)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("lds"))
+        {
+            // Cargo can propagate native libraries from a `links` crate, but
+            // not a raw linker argument. Give lld the script through `-l`;
+            // it recognizes a non-ELF input as a linker script and does not
+            // add a DT_NEEDED entry for it.
+            let source = overlay.join(library.trim_start_matches("//"));
+            let name = "cronet_android_linker_script";
+            let script = fs::read_to_string(&source)
+                .map_err(display_error("read the Android linker script"))?;
+            write_if_changed(
+                &output_dir.join(format!("lib{name}.so")),
+                script.as_bytes(),
+                "install the Android linker script",
+            )?;
+            manifest.push_str("linker-script=");
+            manifest.push_str(name);
+            manifest.push('\n');
+        } else {
+            manifest.push_str("lib=");
+            manifest.push_str(library);
+            manifest.push('\n');
+        }
     }
     for framework in frameworks
         .lines()
@@ -626,8 +792,11 @@ fn write_static_link_manifest(
         manifest.push_str(framework.strip_suffix(".framework").unwrap_or(framework));
         manifest.push('\n');
     }
-    fs::write(output_dir.join("cronet-static-link.txt"), manifest)
-        .map_err(display_error("write Cronet static link manifest"))
+    write_if_changed(
+        &output_dir.join("cronet-static-link.txt"),
+        manifest.as_bytes(),
+        "write Cronet static link manifest",
+    )
 }
 
 fn vendor_source(args: &[std::ffi::OsString]) -> Result<(), String> {
@@ -744,8 +913,14 @@ fn gn_target_args(target: &str) -> Result<Vec<String>, String> {
     let (target_os, target_cpu) = match target {
         "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-ohos" => ("linux", "x64"),
         "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-ohos" => ("linux", "arm64"),
+        "i686-linux-android" => ("android", "x86"),
+        "x86_64-linux-android" => ("android", "x64"),
+        "armv7-linux-androideabi" => ("android", "arm"),
+        "aarch64-linux-android" => ("android", "arm64"),
         "x86_64-apple-darwin" => ("mac", "x64"),
         "aarch64-apple-darwin" => ("mac", "arm64"),
+        "x86_64-apple-ios" => ("ios", "x64"),
+        "aarch64-apple-ios" | "aarch64-apple-ios-sim" => ("ios", "arm64"),
         "x86_64-pc-windows-msvc" => ("win", "x64"),
         "aarch64-pc-windows-msvc" => ("win", "arm64"),
         "armv7-unknown-linux-ohos" => ("linux", "arm"),
@@ -755,6 +930,327 @@ fn gn_target_args(target: &str) -> Result<Vec<String>, String> {
         format!("target_os=\"{target_os}\""),
         format!("target_cpu=\"{target_cpu}\""),
     ])
+}
+
+fn is_android_target(target: &str) -> bool {
+    matches!(
+        target,
+        "i686-linux-android"
+            | "x86_64-linux-android"
+            | "armv7-linux-androideabi"
+            | "aarch64-linux-android"
+    )
+}
+
+fn is_ios_target(target: &str) -> bool {
+    matches!(
+        target,
+        "x86_64-apple-ios" | "aarch64-apple-ios" | "aarch64-apple-ios-sim"
+    )
+}
+
+fn android_gn_args(
+    source: &Path,
+    overlay: &Path,
+    target: &str,
+    explicit_ndk: Option<&Path>,
+    explicit_api_level: Option<u32>,
+) -> Result<Vec<String>, String> {
+    let ndk = android_ndk(explicit_ndk)?
+        .canonicalize()
+        .map_err(display_error("resolve the Android NDK"))?;
+    require_file(
+        &ndk.join("source.properties"),
+        "install a complete Android NDK",
+    )?;
+    if !ndk.join("toolchains/llvm/prebuilt").is_dir() {
+        return Err(format!(
+            "Android NDK toolchain is missing below {}",
+            ndk.display()
+        ));
+    }
+    let revision = fs::read_to_string(ndk.join("source.properties"))
+        .map_err(display_error("read the Android NDK revision"))?;
+    let major = revision
+        .lines()
+        .find_map(|line| line.strip_prefix("Pkg.Revision = "))
+        .and_then(|version| version.split('.').next())
+        .and_then(|major| major.parse::<u32>().ok())
+        .ok_or_else(|| {
+            format!(
+                "could not determine the Android NDK revision from {}",
+                ndk.join("source.properties").display()
+            )
+        })?;
+    let api_level = if let Some(level) = explicit_api_level {
+        level
+    } else if let Ok(value) = env::var(ANDROID_API_LEVEL_ENV) {
+        value.parse::<u32>().map_err(|_| {
+            format!("{ANDROID_API_LEVEL_ENV} must be an integer Android API level, got `{value}`")
+        })?
+    } else {
+        23
+    };
+    if api_level < 23 {
+        return Err(format!(
+            "Android API level {api_level} is below Cronet's minimum API 23"
+        ));
+    }
+
+    let mut arguments = vec![
+        gn_string_path("android_ndk_root", &ndk),
+        format!("android_ndk_version=\"r{major}\""),
+        format!("android_ndk_api_level={api_level}"),
+        "android_static_analysis=\"off\"".to_owned(),
+        // LLVM 22's relative-vtable relocations require an equally new final
+        // linker. Rust Android applications normally use the selected NDK's
+        // lld (r27 currently ships lld 18), so use the portable C++ ABI for
+        // source-built static libraries.
+        "use_relative_vtables_abi=false".to_owned(),
+    ];
+    if let Some(clang_base) =
+        prepare_android_clang_overlay(source, overlay, target, &ndk, api_level)?
+    {
+        arguments.push(gn_string_path("clang_base_path", &clang_base));
+    }
+    Ok(arguments)
+}
+
+/// Chromium publishes host-native Clang packages. The Linux package includes
+/// Android compiler-rt runtimes, but the macOS package intentionally does not
+/// because upstream Chromium only supports Android builds from Linux. Keep the
+/// host-native compiler and complete only its target runtime from the selected
+/// NDK in the generated GN overlay. The synchronized source/toolchain is never
+/// modified, and Linux hosts that already have the runtime need no overlay.
+fn prepare_android_clang_overlay(
+    source: &Path,
+    overlay: &Path,
+    target: &str,
+    ndk: &Path,
+    api_level: u32,
+) -> Result<Option<PathBuf>, String> {
+    let clang_base = source.join("third_party/llvm-build/Release+Asserts");
+    let resource_root = clang_base.join("lib/clang");
+    let resource_dir = latest_clang_resource_dir(&resource_root)?;
+    let (ndk_archive_name, compiler_directory) = android_compiler_runtime(target, api_level)?;
+    let bundled_runtime = resource_dir
+        .join("lib")
+        .join(&compiler_directory)
+        .join("libclang_rt.builtins.a");
+    if bundled_runtime.is_file() {
+        return Ok(None);
+    }
+
+    let ndk_runtime = find_android_ndk_runtime(ndk, ndk_archive_name)?;
+    let generated_base = overlay.join("cronet_rs_android_clang");
+    let generated_runtime = generated_base
+        .join("lib/clang")
+        .join(resource_dir.file_name().ok_or_else(|| {
+            format!(
+                "invalid Chromium Clang resource path {}",
+                resource_dir.display()
+            )
+        })?)
+        .join("lib")
+        .join(&compiler_directory)
+        .join("libclang_rt.builtins.a");
+    if generated_runtime.is_file() && generated_base.join("bin/clang").is_file() {
+        return Ok(Some(generated_base));
+    }
+    if generated_base.exists() {
+        fs::remove_dir_all(&generated_base)
+            .map_err(display_error("replace generated Android Clang overlay"))?;
+    }
+    fs::create_dir_all(&generated_base)
+        .map_err(display_error("create generated Android Clang overlay"))?;
+
+    mirror_directory_entries(&clang_base, &generated_base, &["lib"])?;
+    let generated_lib = generated_base.join("lib");
+    fs::create_dir(&generated_lib)
+        .map_err(display_error("create Android Clang library overlay"))?;
+    mirror_directory_entries(&clang_base.join("lib"), &generated_lib, &["clang"])?;
+    let generated_clang = generated_lib.join("clang");
+    fs::create_dir(&generated_clang)
+        .map_err(display_error("create Android Clang resource overlay"))?;
+
+    let resource_name = resource_dir.file_name().ok_or_else(|| {
+        format!(
+            "invalid Chromium Clang resource path {}",
+            resource_dir.display()
+        )
+    })?;
+    for entry in
+        fs::read_dir(&resource_root).map_err(display_error("list Chromium Clang resources"))?
+    {
+        let entry = entry.map_err(display_error("read Chromium Clang resource entry"))?;
+        if entry.file_name() != resource_name {
+            ensure_symlink(&entry.path(), &generated_clang.join(entry.file_name()))?;
+        }
+    }
+
+    let generated_resource = generated_clang.join(resource_name);
+    fs::create_dir(&generated_resource).map_err(display_error(
+        "create selected Android Clang resource overlay",
+    ))?;
+    mirror_directory_entries(&resource_dir, &generated_resource, &["lib"])?;
+    let generated_resource_lib = generated_resource.join("lib");
+    fs::create_dir(&generated_resource_lib)
+        .map_err(display_error("create Android compiler runtime overlay"))?;
+    mirror_directory_entries(&resource_dir.join("lib"), &generated_resource_lib, &[])?;
+
+    let target_runtime = generated_resource_lib.join(compiler_directory);
+    fs::create_dir(&target_runtime)
+        .map_err(display_error("create Android target runtime directory"))?;
+    fs::copy(&ndk_runtime, target_runtime.join("libclang_rt.builtins.a"))
+        .map_err(display_error("install the Android compiler runtime"))?;
+    Ok(Some(generated_base))
+}
+
+fn latest_clang_resource_dir(root: &Path) -> Result<PathBuf, String> {
+    let mut candidates = fs::read_dir(root)
+        .map_err(display_error("list Chromium Clang resource directories"))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.join("include").is_dir() && path.join("lib").is_dir())
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.pop().ok_or_else(|| {
+        format!(
+            "Chromium Clang has no complete resource directory below {}",
+            root.display()
+        )
+    })
+}
+
+fn android_compiler_runtime(
+    target: &str,
+    api_level: u32,
+) -> Result<(&'static str, String), String> {
+    let (archive, llvm_arch) = match target {
+        "aarch64-linux-android" => ("libclang_rt.builtins-aarch64-android.a", "aarch64"),
+        "armv7-linux-androideabi" => ("libclang_rt.builtins-arm-android.a", "arm"),
+        "i686-linux-android" => ("libclang_rt.builtins-i686-android.a", "i686"),
+        "x86_64-linux-android" => ("libclang_rt.builtins-x86_64-android.a", "x86_64"),
+        other => {
+            return Err(format!(
+                "unsupported Android compiler runtime target `{other}`"
+            ));
+        }
+    };
+    Ok((
+        archive,
+        format!("{llvm_arch}-unknown-linux-android{api_level}"),
+    ))
+}
+
+fn find_android_ndk_runtime(ndk: &Path, archive_name: &str) -> Result<PathBuf, String> {
+    let prebuilt_root = ndk.join("toolchains/llvm/prebuilt");
+    let mut candidates = Vec::new();
+    for prebuilt in
+        fs::read_dir(&prebuilt_root).map_err(display_error("list Android NDK toolchains"))?
+    {
+        let clang_root = prebuilt
+            .map_err(display_error("read Android NDK toolchain entry"))?
+            .path()
+            .join("lib/clang");
+        let Ok(versions) = fs::read_dir(clang_root) else {
+            continue;
+        };
+        for version in versions.flatten() {
+            let candidate = version.path().join("lib/linux").join(archive_name);
+            if candidate.is_file() {
+                candidates.push(candidate);
+            }
+        }
+    }
+    candidates.sort();
+    candidates.pop().ok_or_else(|| {
+        format!(
+            "Android NDK {} does not contain compiler runtime `{archive_name}`",
+            ndk.display()
+        )
+    })
+}
+
+fn mirror_directory_entries(
+    source: &Path,
+    destination: &Path,
+    skipped: &[&str],
+) -> Result<(), String> {
+    for entry in fs::read_dir(source).map_err(display_error("list toolchain directory"))? {
+        let entry = entry.map_err(display_error("read toolchain directory entry"))?;
+        if skipped
+            .iter()
+            .any(|name| entry.file_name().to_string_lossy() == *name)
+        {
+            continue;
+        }
+        ensure_symlink(&entry.path(), &destination.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+fn android_ndk(explicit: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(path) = explicit {
+        return Ok(path.to_owned());
+    }
+    for variable in [ANDROID_NDK_HOME_ENV, "ANDROID_NDK_ROOT", "NDK_HOME"] {
+        if let Some(path) = env::var_os(variable) {
+            return Ok(PathBuf::from(path));
+        }
+    }
+    Err(format!(
+        "Android NDK not configured; call Build::android_ndk or set {ANDROID_NDK_HOME_ENV}/ANDROID_NDK_ROOT/NDK_HOME"
+    ))
+}
+
+fn ios_gn_args(
+    target: &str,
+    explicit_developer_dir: Option<&Path>,
+    explicit_deployment_target: Option<&str>,
+) -> Result<Vec<String>, String> {
+    if !cfg!(target_os = "macos") {
+        return Err("iOS source builds require a macOS host with Xcode".to_owned());
+    }
+    let target_environment = match target {
+        "aarch64-apple-ios" => "device",
+        "aarch64-apple-ios-sim" | "x86_64-apple-ios" => "simulator",
+        _ => return Err(format!("unsupported iOS target `{target}`")),
+    };
+    let mut arguments = vec![
+        format!("target_environment=\"{target_environment}\""),
+        "target_platform=\"iphoneos\"".to_owned(),
+        "use_system_xcode=true".to_owned(),
+        "ios_enable_code_signing=false".to_owned(),
+    ];
+    if let Some(directory) = explicit_developer_dir
+        .map(Path::to_owned)
+        .or_else(|| env::var_os("DEVELOPER_DIR").map(PathBuf::from))
+    {
+        let directory = directory
+            .canonicalize()
+            .map_err(display_error("resolve the Xcode Developer directory"))?;
+        if !directory.join("Platforms").is_dir() {
+            return Err(format!(
+                "Xcode Developer directory is invalid: {}",
+                directory.display()
+            ));
+        }
+        arguments.push(gn_string_path("ios_sdk_developer_dir", &directory));
+    }
+    if let Some(version) = explicit_deployment_target
+        .map(str::to_owned)
+        .or_else(|| env::var("IPHONEOS_DEPLOYMENT_TARGET").ok())
+    {
+        if version.trim().is_empty() {
+            return Err("iOS deployment target cannot be empty".to_owned());
+        }
+        arguments.push(format!(
+            "ios_deployment_target=\"{}\"",
+            escape_gn_string(&version)
+        ));
+    }
+    Ok(arguments)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1029,7 +1525,7 @@ fn escape_gn_string(value: &str) -> String {
 }
 
 fn doctor(args: &[std::ffi::OsString]) -> Result<(), String> {
-    let options = CommonOptions::parse(args, false)?;
+    let options = CommonOptions::parse(args)?;
     let source = options.source_dir;
     let checks = [
         ("git", command_exists("git")),
@@ -1071,7 +1567,7 @@ fn doctor(args: &[std::ffi::OsString]) -> Result<(), String> {
 }
 
 fn print_env(args: &[std::ffi::OsString]) -> Result<(), String> {
-    let options = CommonOptions::parse(args, false)?;
+    let options = CommonOptions::parse(args)?;
     print_env_for(&options.source_dir);
     Ok(())
 }
@@ -1109,13 +1605,19 @@ fn shell_quote(path: &Path) -> String {
 
 struct CommonOptions {
     source_dir: PathBuf,
-    api_only: bool,
 }
 
-impl CommonOptions {
-    fn parse(args: &[std::ffi::OsString], allow_api_only: bool) -> Result<Self, String> {
+struct SyncOptions {
+    source_dir: PathBuf,
+    api_only: bool,
+    target: Option<String>,
+}
+
+impl SyncOptions {
+    fn parse(args: &[std::ffi::OsString]) -> Result<Self, String> {
         let mut source_dir = default_source_dir();
         let mut api_only = false;
+        let mut target = None;
         let mut index = 0;
         while index < args.len() {
             match args[index].to_str() {
@@ -1126,7 +1628,18 @@ impl CommonOptions {
                         .map(PathBuf::from)
                         .ok_or_else(|| "--source-dir requires a path".to_owned())?;
                 }
-                Some("--api-only") if allow_api_only => api_only = true,
+                Some("--api-only") => api_only = true,
+                Some("--target") => {
+                    index += 1;
+                    let value = args
+                        .get(index)
+                        .and_then(|value| value.to_str())
+                        .ok_or_else(|| "--target requires a UTF-8 target triple".to_owned())?;
+                    if !native_target_supported(value) {
+                        return Err(format!("unsupported Cronet native target `{value}`"));
+                    }
+                    target = Some(value.to_owned());
+                }
                 Some(value) => return Err(format!("unexpected option `{value}`")),
                 None => return Err("arguments must be valid UTF-8".to_owned()),
             }
@@ -1135,7 +1648,30 @@ impl CommonOptions {
         Ok(Self {
             source_dir,
             api_only,
+            target,
         })
+    }
+}
+
+impl CommonOptions {
+    fn parse(args: &[std::ffi::OsString]) -> Result<Self, String> {
+        let mut source_dir = default_source_dir();
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].to_str() {
+                Some("--source-dir") => {
+                    index += 1;
+                    source_dir = args
+                        .get(index)
+                        .map(PathBuf::from)
+                        .ok_or_else(|| "--source-dir requires a path".to_owned())?;
+                }
+                Some(value) => return Err(format!("unexpected option `{value}`")),
+                None => return Err("arguments must be valid UTF-8".to_owned()),
+            }
+            index += 1;
+        }
+        Ok(Self { source_dir })
     }
 }
 
@@ -1205,10 +1741,7 @@ impl BuildOptions {
             index += 1;
         }
         Ok(Self {
-            common: CommonOptions {
-                source_dir,
-                api_only: false,
-            },
+            common: CommonOptions { source_dir },
             release,
             target,
             linkage,
@@ -1402,7 +1935,7 @@ fn clone_or_update_depot_tools(path: &Path) -> Result<(), String> {
     )
 }
 
-fn write_gclient(chromium_root: &Path) -> Result<(), String> {
+fn write_gclient(chromium_root: &Path, target: Option<&str>) -> Result<(), String> {
     let mut filter = Command::new(host_python());
     filter
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("filter_deps.py"))
@@ -1413,7 +1946,13 @@ fn write_gclient(chromium_root: &Path) -> Result<(), String> {
         filter.arg(rule);
     }
     run_command(&mut filter, "generate the Cronet-only dependency manifest")?;
+    patch_android_clang_dependency(&chromium_root.join("src/DEPS.cronet"))?;
 
+    let target_os = match target {
+        Some(target) if is_android_target(target) => "['android']",
+        Some(target) if is_ios_target(target) => "['ios']",
+        _ => "[]",
+    };
     let contents = format!(
         "solutions = [{{\n\
          \x20 'name': 'src',\n\
@@ -1423,16 +1962,71 @@ fn write_gclient(chromium_root: &Path) -> Result<(), String> {
          \x20 'custom_deps': {{}},\n\
          \x20 'custom_vars': {{\n\
          \x20   'checkout_pgo_profiles': False,\n\
+         \x20   'checkout_openxr': False,\n\
          \x20   'checkout_telemetry_dependencies': False,\n\
          \x20   'checkout_wpr_archives': False,\n\
          \x20 }},\n\
          }}]\n\
-         target_os = []\n"
+         target_os = {target_os}\n"
     );
     fs::write(chromium_root.join(".gclient"), contents).map_err(display_error("write .gclient"))
 }
 
-fn write_cronet_overlay(source: &Path) -> Result<PathBuf, String> {
+fn patch_android_clang_dependency(manifest: &Path) -> Result<(), String> {
+    const MARKER: &str =
+        "'condition': '(host_os == \"linux\" or checkout_android) and non_git_source',";
+    const PATCH: &str = "'condition': 'host_os == \"linux\" and non_git_source',";
+    let mut contents = fs::read_to_string(manifest).map_err(display_error(
+        "read the filtered Cronet dependency manifest",
+    ))?;
+    if !contents.contains(MARKER) {
+        return Err("Chromium changed the Android Clang package condition".to_owned());
+    }
+    contents = contents.replacen(MARKER, PATCH, 1);
+    for unused_package in [
+        r"          {
+              'package': 'chromium/third_party/android_sdk/public/emulator',
+              'version': Var('android_sdk_emulator_version'),
+          },
+",
+        r"          {
+              'package': 'chromium/third_party/android_sdk/public/platform-tools',
+              'version': Var('android_sdk_platform-tools_version'),
+          },
+",
+        r"          {
+              'package': 'chromium/third_party/android_sdk/public/cmdline-tools',
+              'version': 'gekOVsZjseS1w9BXAT3FsoW__ByGDJYS9DgqesiwKYoC',
+          },
+",
+    ] {
+        if !contents.contains(unused_package) {
+            return Err("Chromium changed the Android SDK CIPD package list".to_owned());
+        }
+        contents = contents.replacen(unused_package, "", 1);
+    }
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        const LINUX_JDK: &str = r"'package': 'chromium/third_party/jdk/linux-amd64',
+              'version': '2iiuF-nKDH3moTImx2op4WTRetbfhzKoZhH7Xo44zGsC',";
+        const MAC_JDK: &str = r"'package': 'chromium/third_party/jdk/mac-arm64',
+              'version': 'mwIUzTAGHZOaLLhBZDjHjmVYQnszzFskzBEPnWZyfKoC',";
+        if !contents.contains(LINUX_JDK) {
+            return Err("Chromium changed the pinned Android build JDK".to_owned());
+        }
+        // Chromium officially drives Android from Linux and therefore locks a
+        // Linux JDK. Use the same upstream JDK 23 release for an Apple Silicon
+        // host; both immutable CIPD instances carry the same version tag.
+        contents = contents.replacen(LINUX_JDK, MAC_JDK, 1);
+    }
+    write_if_changed(
+        manifest,
+        contents.as_bytes(),
+        "select native Android host-tool packages",
+    )
+}
+
+#[allow(clippy::too_many_lines)] // Platform patch stages must share one generated overlay lifecycle.
+fn write_cronet_overlay(source: &Path, target: Option<&str>) -> Result<PathBuf, String> {
     const ANGLE_IMPORT: &str = "import(\"//third_party/angle/dotfile_settings.gni\")\n";
     const ANGLE_ALLOWLIST: &str = "    angle_dotfile_settings.exec_script_allowlist +\n";
 
@@ -1443,7 +2037,22 @@ fn write_cronet_overlay(source: &Path) -> Result<PathBuf, String> {
         .parent()
         .expect("Chromium src directory must have a parent")
         .join("cronet-gn-root");
+    let platform_marker = overlay.join(".cronet-rs-platform");
+    let platform = target.unwrap_or("host");
+    if overlay.exists()
+        && fs::read_to_string(&platform_marker).is_ok_and(|current| current.trim() != platform)
+    {
+        // Platform overlays have intentionally different source selections.
+        // Persistent target-specific Ninja output is outside this generated
+        // directory, so replacing the overlay when the target changes is safe.
+        fs::remove_dir_all(&overlay).map_err(display_error("replace Cronet GN overlay"))?;
+    }
     fs::create_dir_all(&overlay).map_err(display_error("create Cronet GN overlay"))?;
+    write_if_changed(
+        &platform_marker,
+        format!("{platform}\n").as_bytes(),
+        "write the Cronet overlay platform marker",
+    )?;
 
     for entry in fs::read_dir(&source).map_err(display_error("list Chromium source directory"))? {
         let entry = entry.map_err(display_error("read Chromium source entry"))?;
@@ -1474,19 +2083,29 @@ fn write_cronet_overlay(source: &Path) -> Result<PathBuf, String> {
     let source_out = source.join("out");
     fs::create_dir_all(&source_out).map_err(display_error("create Chromium output directory"))?;
     ensure_symlink(&source_out, &overlay.join("out"))?;
-    write_build_overlay(&source, &overlay)?;
+    let filter_tests = true;
+    write_build_overlay(&source, &overlay, filter_tests)?;
     write_buildtools_overlay(&source, &overlay)?;
-    write_ohos_overlay(&source, &overlay)?;
+    write_platform_overlay(&source, &overlay)?;
     for directory in ["base", "crypto", "net", "url"] {
-        write_test_filtered_directory(&source.join(directory), &overlay.join(directory))?;
+        write_test_filtered_directory(
+            &source.join(directory),
+            &overlay.join(directory),
+            filter_tests,
+        )?;
     }
+    patch_ios_base_features(&source, &overlay, target)?;
     patch_ohos_partition_alloc(&source, &overlay)?;
     patch_ohos_base_process(&source, &overlay)?;
     patch_ohos_resolver(&source, &overlay)?;
     patch_ohos_link_closure(&source, &overlay)?;
-    write_cronet_component_overlay(&source, &overlay)?;
+    patch_android_ndk_compat(&source, &overlay, target)?;
+    patch_android_proxy_listener(&source, &overlay, target)?;
+    write_cronet_component_overlay(&source, &overlay, filter_tests)?;
     write_testing_overlay(&source, &overlay)?;
-    write_third_party_overlay(&source, &overlay)?;
+    let filter_third_party_tests = !target.is_some_and(is_android_target);
+    write_third_party_overlay(&source, &overlay, filter_third_party_tests)?;
+    patch_android_host_tools(&source, &overlay, target)?;
     write_cxx_libcxx_compat_overlay(&source, &overlay)?;
 
     let upstream = fs::read_to_string(source.join(".gn"))
@@ -1500,18 +2119,438 @@ fn write_cronet_overlay(source: &Path) -> Result<PathBuf, String> {
         .replacen(ANGLE_IMPORT, "", 1)
         .replacen(ANGLE_ALLOWLIST, "", 1);
     fs::write(overlay.join(".gn"), filtered).map_err(display_error("write Cronet GN dotfile"))?;
-    fs::write(
-        overlay.join("BUILD.gn"),
+    let mut root_build = String::from(
         "# Generated by cronet-rs xtask; do not edit.\n\n\
          group(\"cronet_rs\") {\n\
          \x20 deps = [ \"//components/cronet:cronet\" ]\n\
          }\n",
-    )
-    .map_err(display_error("write Cronet-only root BUILD.gn"))?;
+    );
+    if target.is_some_and(is_android_target) {
+        root_build.push_str(
+            r#"
+
+import("//build/config/android/rules.gni")
+
+# base_java is compiled against a placeholder BuildConfig but intentionally
+# does not package it. Native-only consumers do not have an APK target to
+# generate the usual replacement, so compile the pinned placeholder here.
+android_library("cronet_rs_android_build_config_java") {
+  srcjar_deps = [ "//build/android:placeholder_build_config_srcjar" ]
+}
+
+# Chromium's Android net implementation calls these Java classes from native
+# code. Keep the jar deliberately narrower than the public Cronet Java API: a
+# Rust application uses Cronet through cronet-sys and only needs the platform
+# bridge and its runtime dependencies.
+dist_jar("cronet_rs_android_support_java") {
+  output = "$root_out_dir/cronet-android-support.jar"
+  deps = [
+    ":cronet_rs_android_build_config_java",
+    "//net/android:net_java",
+  ]
+  jar_excluded_patterns = [ "META-INF/versions/*/module-info.class" ]
+  requires_android = true
+}
+"#,
+        );
+    }
+    write_if_changed(
+        &overlay.join("BUILD.gn"),
+        root_build.as_bytes(),
+        "write Cronet-only root BUILD.gn",
+    )?;
     Ok(overlay)
 }
 
-fn write_third_party_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
+fn patch_ios_base_features(
+    source: &Path,
+    overlay: &Path,
+    target: Option<&str>,
+) -> Result<(), String> {
+    const MARKER: &str = "#if !BUILDFLAG(IS_IOS) || !BUILDFLAG(USE_BLINK)";
+    const PATCH: &str =
+        "#if !BUILDFLAG(IS_IOS) || (!BUILDFLAG(USE_BLINK) && !BUILDFLAG(CRONET_BUILD))";
+    if !target.is_some_and(is_ios_target) {
+        return Ok(());
+    }
+    let source_path = source.join("base/features.cc");
+    let destination = overlay.join("base/features.cc");
+    let mut contents = fs::read_to_string(&source_path)
+        .map_err(display_error("read upstream base feature initialization"))?;
+    if contents.matches(MARKER).count() != 2 {
+        return Err(
+            "upstream base/features.cc changed around its iOS kqueue conditions".to_owned(),
+        );
+    }
+    contents = contents.replace(MARKER, PATCH);
+    replace_generated_link_with_file(&destination)?;
+    write_if_changed(
+        &destination,
+        contents.as_bytes(),
+        "write the iOS Cronet message-pump feature patch",
+    )
+}
+
+fn patch_android_ndk_compat(
+    source: &Path,
+    overlay: &Path,
+    target: Option<&str>,
+) -> Result<(), String> {
+    const MARKER: &str = r"  if (__builtin_available(android 26, *)) {
+    const prop_info* info = __system_property_find(name);
+    if (info) {
+      __system_property_read_callback(info, &ReadIntProperty, &result);
+    }
+  } else {
+    char value[PROP_VALUE_MAX] = {};
+    if (__system_property_get(name, value) >= 1) {
+      result = atoi(value);
+    }
+  }
+";
+    const PATCH: &str = r"#if __ANDROID_API__ >= 26
+  if (__builtin_available(android 26, *)) {
+    const prop_info* info = __system_property_find(name);
+    if (info) {
+      __system_property_read_callback(info, &ReadIntProperty, &result);
+    }
+  } else {
+    char value[PROP_VALUE_MAX] = {};
+    if (__system_property_get(name, value) >= 1) {
+      result = atoi(value);
+    }
+  }
+#else
+  char value[PROP_VALUE_MAX] = {};
+  if (__system_property_get(name, value) >= 1) {
+    result = atoi(value);
+  }
+#endif
+";
+    if !target.is_some_and(is_android_target) {
+        return Ok(());
+    }
+    patch_exact_source_file(
+        source,
+        overlay,
+        "base/android/linker/ashmem.cc",
+        MARKER,
+        PATCH,
+        "write the Android API 23 system-property compatibility patch",
+    )
+}
+
+#[allow(clippy::items_after_statements, clippy::too_many_lines)] // Keep exact upstream Java anchors beside their replacements.
+fn patch_android_proxy_listener(
+    source: &Path,
+    overlay: &Path,
+    target: Option<&str>,
+) -> Result<(), String> {
+    if !target.is_some_and(is_android_target) {
+        return Ok(());
+    }
+    const IMPORT_MARKER: &str = "import java.util.Locale;";
+    const IMPORT_PATCH: &str =
+        "import java.util.Locale;\nimport java.util.concurrent.CountDownLatch;";
+    const CONSTRUCTOR_MARKER: &str = r"    private ProxyChangeListener() {
+        Looper myLooper = Looper.myLooper();
+        assert myLooper != null;
+        mLooper = myLooper;
+        mHandler = new Handler(mLooper);
+    }";
+    const CONSTRUCTOR_PATCH: &str = r"    private ProxyChangeListener() {
+        // cronet-rs' native C API initializes from a Chromium sequenced task
+        // runner, which has no Java Looper. Android service callbacks belong
+        // on the application's always-running main Looper.
+        mLooper = Looper.getMainLooper();
+        mHandler = new Handler(mLooper);
+    }";
+    const START_STOP_MARKER: &str = r#"    @CalledByNative
+    public void start(long nativePtr) {
+        try (TraceEvent e = TraceEvent.scoped("ProxyChangeListener.start")) {
+            assertOnThread();
+            assert mNativePtr == 0;
+            mNativePtr = nativePtr;
+            registerBroadcastReceiver();
+        }
+    }
+
+    @CalledByNative
+    public void stop() {
+        assertOnThread();
+        mNativePtr = 0;
+        unregisterBroadcastReceiver();
+    }"#;
+    const START_STOP_PATCH: &str = r#"    @CalledByNative
+    public void start(long nativePtr) {
+        runOnThreadBlocking(
+                () -> {
+                    try (TraceEvent e = TraceEvent.scoped("ProxyChangeListener.start")) {
+                        assert mNativePtr == 0;
+                        mNativePtr = nativePtr;
+                        registerBroadcastReceiver();
+                    }
+                });
+    }
+
+    @CalledByNative
+    public void stop() {
+        runOnThreadBlocking(
+                () -> {
+                    mNativePtr = 0;
+                    unregisterBroadcastReceiver();
+                });
+    }"#;
+    const RUN_MARKER: &str = r"    private void runOnThread(Runnable r) {
+        if (onThread()) {
+            r.run();
+        } else {
+            mHandler.post(r);
+        }
+    }";
+    const RUN_PATCH: &str = r#"    private void runOnThread(Runnable r) {
+        if (onThread()) {
+            r.run();
+        } else {
+            mHandler.post(r);
+        }
+    }
+
+    private void runOnThreadBlocking(Runnable r) {
+        if (onThread()) {
+            r.run();
+            return;
+        }
+        CountDownLatch done = new CountDownLatch(1);
+        mHandler.post(
+                () -> {
+                    try {
+                        r.run();
+                    } finally {
+                        done.countDown();
+                    }
+                });
+        try {
+            done.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while calling the Android proxy service", e);
+        }
+    }"#;
+
+    let relative = "net/android/java/src/org/chromium/net/ProxyChangeListener.java";
+    let mut contents = fs::read_to_string(source.join(relative))
+        .map_err(display_error("read Android proxy listener"))?;
+    for (marker, patch) in [
+        (IMPORT_MARKER, IMPORT_PATCH),
+        (CONSTRUCTOR_MARKER, CONSTRUCTOR_PATCH),
+        (START_STOP_MARKER, START_STOP_PATCH),
+        (RUN_MARKER, RUN_PATCH),
+    ] {
+        if !contents.contains(marker) {
+            return Err("Chromium changed the Android proxy listener layout".to_owned());
+        }
+        contents = contents.replacen(marker, patch, 1);
+    }
+    let output = overlay.join(relative);
+    replace_generated_link_with_file(&output)?;
+    write_if_changed(
+        &output,
+        contents.as_bytes(),
+        "write standalone Android proxy listener",
+    )
+}
+
+fn patch_android_host_tools(
+    source: &Path,
+    overlay: &Path,
+    target: Option<&str>,
+) -> Result<(), String> {
+    if !cfg!(target_os = "macos") || !target.is_some_and(is_android_target) {
+        return Ok(());
+    }
+
+    let sdk_root = ["ANDROID_SDK_ROOT", "ANDROID_HOME"]
+        .iter()
+        .find_map(env::var_os)
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join("Library/Android/sdk"))
+        })
+        .ok_or_else(|| {
+            "Android SDK not configured; set ANDROID_SDK_ROOT or ANDROID_HOME".to_owned()
+        })?;
+    let local_build_tools_root = sdk_root.join("build-tools");
+    let mut local_versions = fs::read_dir(&local_build_tools_root)
+        .map_err(display_error("list Android SDK build tools"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.join("aidl").is_file() && path.join("aapt2").is_file())
+        .collect::<Vec<_>>();
+    local_versions.sort();
+    let local_build_tools = local_versions.pop().ok_or_else(|| {
+        format!(
+            "no complete Android SDK build-tools installation found in {}",
+            local_build_tools_root.display()
+        )
+    })?;
+
+    let pinned_root = source.join("third_party/android_sdk/public/build-tools");
+    let mut pinned_versions = fs::read_dir(&pinned_root)
+        .map_err(display_error("list pinned Android SDK build tools"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    pinned_versions.sort();
+    let pinned = pinned_versions.pop().ok_or_else(|| {
+        format!(
+            "no pinned Android SDK build tools found in {}",
+            pinned_root.display()
+        )
+    })?;
+    let destination = overlay
+        .join("third_party/android_sdk/public/build-tools")
+        .join(pinned.file_name().expect("pinned build tools have a name"));
+    let current_is_expected = fs::symlink_metadata(&destination)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        && fs::read_link(&destination).is_ok_and(|current| current == local_build_tools);
+    if !current_is_expected {
+        if let Ok(metadata) = fs::symlink_metadata(&destination) {
+            if metadata.file_type().is_symlink() || metadata.is_file() {
+                fs::remove_file(&destination)
+                    .map_err(display_error("replace Android host build-tools link"))?;
+            } else if metadata.is_dir() {
+                fs::remove_dir_all(&destination)
+                    .map_err(display_error("replace Android host build-tools directory"))?;
+            }
+        }
+    }
+    ensure_symlink(&local_build_tools, &destination)?;
+    patch_android_host_jdk(source, overlay, target)
+}
+
+#[allow(clippy::items_after_statements)] // Large upstream input lists stay next to the validation that consumes them.
+fn patch_android_host_jdk(
+    source: &Path,
+    overlay: &Path,
+    target: Option<&str>,
+) -> Result<(), String> {
+    if !cfg!(target_os = "macos") || !target.is_some_and(is_android_target) {
+        return Ok(());
+    }
+    let java_home = source.join("third_party/jdk/current/Contents/Home");
+    require_file(
+        &java_home.join("bin/javap"),
+        "synchronize the pinned macOS Android build JDK",
+    )?;
+
+    let current = overlay.join("third_party/jdk/current");
+    let current_is_expected = fs::symlink_metadata(&current)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        && fs::read_link(&current).is_ok_and(|current| current == java_home);
+    if !current_is_expected {
+        if let Ok(metadata) = fs::symlink_metadata(&current) {
+            if metadata.file_type().is_symlink() {
+                fs::remove_file(&current)
+                    .map_err(display_error("replace the generated host JDK link"))?;
+            } else if metadata.is_dir() {
+                fs::remove_dir_all(&current)
+                    .map_err(display_error("replace the generated host JDK directory"))?;
+            } else {
+                return Err(format!(
+                    "{} blocks the generated host JDK link",
+                    current.display()
+                ));
+            }
+        }
+    }
+    ensure_symlink(&java_home, &current)?;
+
+    let build_path = overlay.join("third_party/jdk/BUILD.gn");
+    let build = fs::read_to_string(&build_path)
+        .map_err(display_error("read the generated JDK build file"))?;
+    const LINUX_INCLUDE: &str = "    \"current/include/linux\",";
+    if !build.contains(LINUX_INCLUDE) {
+        return Err("Chromium changed the host JDK include layout".to_owned());
+    }
+    write_if_changed(
+        &build_path,
+        build
+            .replacen(LINUX_INCLUDE, "    \"current/include/darwin\",", 1)
+            .as_bytes(),
+        "select the macOS host JDK headers",
+    )?;
+
+    // Chromium's Android configuration enumerates the Linux CIPD JDK runtime
+    // files as Ninja inputs. A caller-selected macOS JDK has the same tools but
+    // uses .dylib names and does not ship the java.chromium wrapper. Track the
+    // actual launchers here; the JDK directory itself remains the data input.
+    const INPUTS_MARKER: &str = r#"  _common_inputs_for_jre_jdk = [
+    "//third_party/jdk/current/conf/logging.properties",
+    "//third_party/jdk/current/conf/security/java.security",
+    "//third_party/jdk/current/lib/ct.sym",
+    "//third_party/jdk/current/lib/jrt-fs.jar",
+    "//third_party/jdk/current/lib/jvm.cfg",
+    "//third_party/jdk/current/lib/libawt.so",
+    "//third_party/jdk/current/lib/libawt_headless.so",
+    "//third_party/jdk/current/lib/libawt_xawt.so",
+    "//third_party/jdk/current/lib/libjava.so",
+    "//third_party/jdk/current/lib/libjimage.so",
+    "//third_party/jdk/current/lib/libjli.so",
+    "//third_party/jdk/current/lib/libjsvml.so",
+    "//third_party/jdk/current/lib/libmanagement.so",
+    "//third_party/jdk/current/lib/libmanagement_ext.so",
+    "//third_party/jdk/current/lib/libnet.so",
+    "//third_party/jdk/current/lib/libnio.so",
+    "//third_party/jdk/current/lib/libverify.so",
+    "//third_party/jdk/current/lib/libzip.so",
+    "//third_party/jdk/current/lib/modules",
+    "//third_party/jdk/current/lib/server/classes.jsa",
+    "//third_party/jdk/current/lib/server/libjvm.so",
+    "//third_party/jdk/current/lib/tzdb.dat",
+  ]
+
+  # Actions that use java should add this as inputs so that they are rebuilt
+  # when the JDK changes.
+  java_paths_for_inputs = [
+                            "//third_party/jdk/current/bin/java",
+                            "//third_party/jdk/current/bin/java.chromium",
+                          ] + _common_inputs_for_jre_jdk
+"#;
+    const INPUTS_PATCH: &str = r#"  _common_inputs_for_jre_jdk = []
+
+  # Actions that use java should add this as inputs so that they are rebuilt
+  # when the JDK changes.
+  java_paths_for_inputs = [ "//third_party/jdk/current/bin/java" ]
+"#;
+    let source_android_config = source.join("build/config/android");
+    let overlay_android_config = overlay.join("build/config/android");
+    // build/config is otherwise mirrored shallowly. Materialize this one
+    // directory before replacing config.gni so the generated overlay never
+    // writes through a parent symlink into the pinned checkout.
+    write_test_filtered_directory(&source_android_config, &overlay_android_config, false)?;
+    let config_path = overlay_android_config.join("config.gni");
+    let config = fs::read_to_string(source_android_config.join("config.gni"))
+        .map_err(display_error("read the upstream Android configuration"))?;
+    if !config.contains(INPUTS_MARKER) {
+        return Err("Chromium changed the Android JDK runtime input list".to_owned());
+    }
+    replace_generated_link_with_file(&config_path)?;
+    write_if_changed(
+        &config_path,
+        config.replacen(INPUTS_MARKER, INPUTS_PATCH, 1).as_bytes(),
+        "select the macOS host JDK runtime inputs",
+    )
+}
+
+fn write_third_party_overlay(
+    source: &Path,
+    overlay: &Path,
+    filter_tests: bool,
+) -> Result<(), String> {
     let source_third_party = source.join("third_party");
     let overlay_third_party = overlay.join("third_party");
     replace_generated_link_with_directory(&overlay_third_party)?;
@@ -1529,7 +2568,28 @@ fn write_third_party_overlay(source: &Path, overlay: &Path) -> Result<(), String
             continue;
         }
         if entry.path().join("BUILD.gn").is_file() {
-            write_test_filtered_directory(&entry.path(), &destination)?;
+            let preserve_android_java_graph = !filter_tests
+                && matches!(
+                    entry.file_name().to_str(),
+                    Some(
+                        "android_build_tools"
+                            | "android_deps"
+                            | "androidx"
+                            | "aosp_dalvik"
+                            | "byte_buddy"
+                            | "google-truth"
+                            | "hamcrest"
+                            | "icu4j"
+                            | "junit"
+                            | "mockito"
+                            | "sqlite4java"
+                    )
+                );
+            write_test_filtered_directory(
+                &entry.path(),
+                &destination,
+                !preserve_android_java_graph,
+            )?;
         } else {
             ensure_symlink(&entry.path(), &destination)?;
         }
@@ -1582,7 +2642,12 @@ fn write_cxx_libcxx_compat_overlay(source: &Path, overlay: &Path) -> Result<(), 
     )
 }
 
-fn write_test_filtered_directory(source: &Path, overlay: &Path) -> Result<(), String> {
+#[allow(clippy::too_many_lines)] // Filtering and exact GN compatibility rewrites are intentionally atomic.
+fn write_test_filtered_directory(
+    source: &Path,
+    overlay: &Path,
+    filter_tests: bool,
+) -> Result<(), String> {
     const UNUSED_TRACE_PROCESSOR_TYPE: &str = "  if (!is_win) {\n    libtrace_processor_target_type = \"source_set\"\n  } else {\n    libtrace_processor_target_type = \"component\"\n  }\n\n";
 
     replace_generated_link_with_directory(overlay)?;
@@ -1604,6 +2669,7 @@ fn write_test_filtered_directory(source: &Path, overlay: &Path) -> Result<(), St
             || (source.ends_with("base/process") && entry.file_name() == "set_process_title.cc")
             || (source.ends_with("net/dns/public") && entry.file_name() == "scoped_res_state.cc")
             || (source.ends_with("base/debug") && entry.file_name() == "stack_trace_posix.cc")
+            || (source.ends_with("base/android/linker") && entry.file_name() == "ashmem.cc")
             || (source.ends_with("net/cert/internal")
                 && entry.file_name() == "system_trust_store.cc")
         {
@@ -1611,38 +2677,67 @@ fn write_test_filtered_directory(source: &Path, overlay: &Path) -> Result<(), St
         }
         let destination = overlay.join(entry.file_name());
         if entry.path().is_dir() {
-            write_test_filtered_directory(&entry.path(), &destination)?;
+            write_test_filtered_directory(&entry.path(), &destination, filter_tests)?;
         } else {
             ensure_symlink(&entry.path(), &destination)?;
         }
     }
     if source.file_name().is_some_and(|name| name == "base") && source.join("test").is_dir() {
-        write_test_filtered_directory(&source.join("test"), &overlay.join("test"))?;
+        write_test_filtered_directory(&source.join("test"), &overlay.join("test"), filter_tests)?;
     }
     let build_path = source.join("BUILD.gn");
     if !build_path.is_file() {
         return Ok(());
     }
     let build = fs::read_to_string(&build_path).map_err(display_error("read upstream BUILD.gn"))?;
-    let mut build = if source.ends_with("third_party/googletest") {
+    let mut build = if !filter_tests || source.ends_with("third_party/googletest") {
         build
     } else {
         remove_testonly_gn_blocks(build)
     };
-    if source.file_name().is_some_and(|name| name == "net") {
-        const UNUSED_TEST_TYPE: &str = "if (is_cronet_build) {\n  _test_target_type = \"cronet_test\"\n} else {\n  _test_target_type = \"test\"\n}\n\n";
-        if !build.contains(UNUSED_TEST_TYPE) {
+    if filter_tests && source.ends_with("base/test") {
+        const UNUSED_TEST_TRACE_PROCESSOR_TYPE: &str = "_target_type = \"shared_library\"\nif (is_ios) {\n  _target_type = \"ios_framework_bundle\"\n}\n\n";
+        if !build.contains(UNUSED_TEST_TRACE_PROCESSOR_TYPE) {
             return Err(
-                "upstream net/BUILD.gn changed around its unit-test target type".to_owned(),
+                "upstream base/test BUILD.gn changed around its trace processor target type"
+                    .to_owned(),
             );
         }
-        build = build.replacen(UNUSED_TEST_TYPE, "", 1);
+        build = build.replacen(UNUSED_TEST_TRACE_PROCESSOR_TYPE, "", 1);
+    }
+    if source.ends_with("build/android") {
+        build = remove_named_gn_blocks(build, "python_library", "resource_sizes_py")?;
+        build = remove_named_gn_blocks(build, "group", "stack_tools")?;
+    }
+    if source.file_name().is_some_and(|name| name == "net") {
+        const UNUSED_TEST_TYPE: &str = "if (is_cronet_build) {\n  _test_target_type = \"cronet_test\"\n} else {\n  _test_target_type = \"test\"\n}\n\n";
+        if filter_tests {
+            if !build.contains(UNUSED_TEST_TYPE) {
+                return Err(
+                    "upstream net/BUILD.gn changed around its unit-test target type".to_owned(),
+                );
+            }
+            build = build.replacen(UNUSED_TEST_TYPE, "", 1);
+        }
         build = remove_named_gn_blocks(build, "component", "extras")?;
         build = remove_named_gn_blocks(build, "component", "shared_dictionary_info")?;
     }
     if source.ends_with("net/third_party/quiche") {
         build = remove_named_gn_blocks(build, "component", "blind_sign_auth")?;
         build = remove_named_gn_blocks(build, "proto_library", "blind_sign_auth_proto")?;
+    }
+    if source.ends_with("components/metrics") {
+        // Upstream's iOS product build enables the full metrics component,
+        // which pulls Mojo, UI and Chrome-only reporting code into GN even
+        // though native Cronet consumes only `library_support`. Preserve the
+        // normal `is_cronet_build` pruning for this standalone C API build.
+        const IOS_PRODUCT_METRICS: &str = "if (!is_cronet_build || is_ios) {";
+        if !build.contains(IOS_PRODUCT_METRICS) {
+            return Err(
+                "upstream metrics BUILD.gn changed around its iOS product graph".to_owned(),
+            );
+        }
+        build = build.replacen(IOS_PRODUCT_METRICS, "if (!is_cronet_build) {", 1);
     }
     if source.ends_with("third_party/perfetto") {
         build = remove_gn_block_with_header(
@@ -1681,7 +2776,7 @@ fn write_testing_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
         .map_err(display_error("write Cronet-only testing/BUILD.gn"))
 }
 
-fn write_build_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
+fn write_build_overlay(source: &Path, overlay: &Path, filter_tests: bool) -> Result<(), String> {
     let source_build = source.join("build");
     let overlay_build = overlay.join("build");
     replace_generated_link_with_directory(&overlay_build)?;
@@ -1689,7 +2784,10 @@ fn write_build_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
         fs::read_dir(&source_build).map_err(display_error("list Chromium build directory"))?
     {
         let entry = entry.map_err(display_error("read Chromium build entry"))?;
-        if matches!(entry.file_name().to_str(), Some("BUILD.gn" | "config")) {
+        if matches!(
+            entry.file_name().to_str(),
+            Some("BUILD.gn" | "android" | "config")
+        ) {
             continue;
         }
         ensure_symlink(&entry.path(), &overlay_build.join(entry.file_name()))?;
@@ -1698,7 +2796,12 @@ fn write_build_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
         .map_err(display_error("read upstream build/BUILD.gn"))?;
     let build = remove_named_gn_blocks(build, "group", "gold_common_pytype")?;
     fs::write(overlay_build.join("BUILD.gn"), build)
-        .map_err(display_error("write Cronet-only build/BUILD.gn"))
+        .map_err(display_error("write Cronet-only build/BUILD.gn"))?;
+    write_test_filtered_directory(
+        &source_build.join("android"),
+        &overlay_build.join("android"),
+        filter_tests,
+    )
 }
 
 fn write_buildtools_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
@@ -2105,10 +3208,35 @@ fn patch_exact_source_file(
     )
 }
 
-fn write_ohos_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
+fn write_platform_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
     write_ohos_toolchain(overlay)?;
     patch_ohos_rust_target(source, overlay)?;
-    patch_ohos_compiler_config(source, overlay)
+    patch_ohos_compiler_config(source, overlay)?;
+    patch_android_gclient_args(source, overlay)
+}
+
+fn patch_android_gclient_args(source: &Path, overlay: &Path) -> Result<(), String> {
+    let relative = "build/config/gclient_args.gni";
+    let contents = fs::read_to_string(source.join(relative))
+        .map_err(display_error("read Chromium gclient arguments"))?;
+    let contents = if contents.contains("checkout_android = false") {
+        contents.replacen(
+            "checkout_android = false",
+            "checkout_android = true  # cronet-src supplies an external Android NDK",
+            1,
+        )
+    } else if contents.contains("checkout_android = true") {
+        contents
+    } else {
+        return Err(format!("Chromium changed around `{relative}`"));
+    };
+    let overlay_path = overlay.join(relative);
+    replace_generated_link_with_file(&overlay_path)?;
+    write_if_changed(
+        &overlay_path,
+        contents.as_bytes(),
+        "write the external Android NDK checkout marker",
+    )
 }
 
 fn write_ohos_toolchain(overlay: &Path) -> Result<(), String> {
@@ -2182,6 +3310,9 @@ fn patch_ohos_rust_target(source: &Path, overlay: &Path) -> Result<(), String> {
     const BUILDCONFIG_MARKER: &str =
         "declare_args() {\n  # Set to enable the official build level of optimization.";
     const BUILDCONFIG_PATCH: &str = "declare_args() {\n  # cronet-rs models OHOS as Linux for Chromium's existing POSIX graph.\n  # Keep the actual target identity globally visible to compatibility logic.\n  cronet_target_ohos = false\n  cronet_ohos_llvm_triple = \"\"\n  cronet_ohos_rust_triple = \"\"\n\n  # Set to enable the official build level of optimization.";
+    const ANDROID_HOST_MARKER: &str =
+        "  assert(host_os == \"linux\", \"Android builds are only supported on Linux.\")";
+    const ANDROID_HOST_PATCH: &str = "  # The external NDK also ships native macOS host tools. Chromium labels\n  # this configuration best-effort; cronet-src verifies its reduced C API graph.\n  assert(host_os == \"linux\" || host_os == \"mac\",\n         \"Android builds require a Linux or macOS host.\")";
     const RUST_TARGET_MARKER: &str = "rust_abi_target = \"\"\nif (is_linux || is_chromeos) {";
     const RUST_TARGET_PATCH: &str = "rust_abi_target = \"\"\nif (cronet_target_ohos && is_a_target_toolchain) {\n  assert(cronet_ohos_rust_triple != \"\", \"cronet-src requires an OHOS Rust target\")\n  rust_abi_target = cronet_ohos_rust_triple\n} else if (is_linux || is_chromeos) {";
     const KNOWN_TARGET_MARKER: &str = "  assert(_is_rust_abi_target_a_known_triple,\n         \"`${rust_abi_target}` needs to be added to \" +";
@@ -2196,7 +3327,7 @@ fn patch_ohos_rust_target(source: &Path, overlay: &Path) -> Result<(), String> {
         let entry = entry.map_err(display_error("read Chromium build config entry"))?;
         if matches!(
             entry.file_name().to_str(),
-            Some("BUILDCONFIG.gn" | "rust.gni" | "compiler")
+            Some("BUILDCONFIG.gn" | "gclient_args.gni" | "rust.gni" | "compiler")
         ) {
             continue;
         }
@@ -2206,10 +3337,12 @@ fn patch_ohos_rust_target(source: &Path, overlay: &Path) -> Result<(), String> {
     let build_config_path = source_config.join("BUILDCONFIG.gn");
     let build_config = fs::read_to_string(&build_config_path)
         .map_err(display_error("read Chromium BUILDCONFIG.gn"))?;
-    if !build_config.contains(BUILDCONFIG_MARKER) {
+    if !build_config.contains(BUILDCONFIG_MARKER) || !build_config.contains(ANDROID_HOST_MARKER) {
         return Err("Chromium BUILDCONFIG.gn changed around its global arguments".to_owned());
     }
-    let build_config = build_config.replacen(BUILDCONFIG_MARKER, BUILDCONFIG_PATCH, 1);
+    let build_config = build_config
+        .replacen(BUILDCONFIG_MARKER, BUILDCONFIG_PATCH, 1)
+        .replacen(ANDROID_HOST_MARKER, ANDROID_HOST_PATCH, 1);
     let overlay_build_config = overlay_config.join("BUILDCONFIG.gn");
     replace_generated_link_with_file(&overlay_build_config)?;
     write_if_changed(
@@ -2247,6 +3380,8 @@ fn patch_ohos_compiler_config(source: &Path, overlay: &Path) -> Result<(), Strin
     const POSIX_CXX23_MARKER: &str =
         "if (use_cxx23) {\n      cflags_cc += [ \"-std=${standard_prefix}++23\" ]";
     const POSIX_CXX23_PATCH: &str = "if (use_cxx23) {\n      if (cronet_target_ohos) {\n        cflags_cc += [ \"-std=${standard_prefix}++2b\" ]\n      } else {\n        cflags_cc += [ \"-std=${standard_prefix}++23\" ]\n      }";
+    const RELATIVE_VTABLE_MARKER: &str = "if (use_relative_vtables_abi) {\n    cflags_cc += [ \"-fexperimental-relative-c++-abi-vtables\" ]\n    ldflags += [ \"-fexperimental-relative-c++-abi-vtables\" ]\n  }";
+    const RELATIVE_VTABLE_PATCH: &str = "if (use_relative_vtables_abi) {\n    cflags_cc += [ \"-fexperimental-relative-c++-abi-vtables\" ]\n    ldflags += [ \"-fexperimental-relative-c++-abi-vtables\" ]\n  } else if (is_android && current_cpu == \"arm64\") {\n    # New Chromium Clang defaults to relative vtables for this ABI. Cronet's\n    # static archive must remain linkable by the older lld bundled with the\n    # caller-selected Android NDK.\n    cflags_cc += [ \"-fno-experimental-relative-c++-abi-vtables\" ]\n  }";
     const SPLIT_THRESHOLD_MARKER: &str = "if (default_toolchain != \"//build/toolchain/cros:target\") {\n      cflags += [\n        \"-mllvm\",\n        \"-split-threshold-for-reg-with-hint=0\",";
     const SPLIT_THRESHOLD_PATCH: &str = "if (default_toolchain != \"//build/toolchain/cros:target\" &&\n        !cronet_target_ohos) {\n      cflags += [\n        \"-mllvm\",\n        \"-split-threshold-for-reg-with-hint=0\",";
     const GNU_TARGET_MARKERS: [(&str, &str); 3] = [
@@ -2284,6 +3419,7 @@ fn patch_ohos_compiler_config(source: &Path, overlay: &Path) -> Result<(), Strin
         || !compiler.contains(CREL_MARKER)
         || !compiler.contains(CXX23_MARKER)
         || !compiler.contains(POSIX_CXX23_MARKER)
+        || !compiler.contains(RELATIVE_VTABLE_MARKER)
         || !compiler.contains(SPLIT_THRESHOLD_MARKER)
     {
         return Err(
@@ -2296,6 +3432,7 @@ fn patch_ohos_compiler_config(source: &Path, overlay: &Path) -> Result<(), Strin
         .replacen(CREL_MARKER, CREL_PATCH, 1)
         .replacen(CXX23_MARKER, CXX23_PATCH, 1)
         .replacen(POSIX_CXX23_MARKER, POSIX_CXX23_PATCH, 1)
+        .replacen(RELATIVE_VTABLE_MARKER, RELATIVE_VTABLE_PATCH, 1)
         .replacen(SPLIT_THRESHOLD_MARKER, SPLIT_THRESHOLD_PATCH, 1);
     for (marker, patch) in GNU_TARGET_MARKERS {
         if !compiler.contains(marker) {
@@ -2310,7 +3447,12 @@ fn patch_ohos_compiler_config(source: &Path, overlay: &Path) -> Result<(), Strin
     )
 }
 
-fn write_cronet_component_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
+#[allow(clippy::too_many_lines)] // The complete Cronet component graph is patched as one version-locked unit.
+fn write_cronet_component_overlay(
+    source: &Path,
+    overlay: &Path,
+    filter_tests: bool,
+) -> Result<(), String> {
     const INCLUDE_MARKER: &str = "#include \"base/at_exit.h\"\n";
     const INIT_MARKER: &str = "#endif\n\n  base::FeatureList::InitInstance";
 
@@ -2326,7 +3468,7 @@ fn write_cronet_component_overlay(source: &Path, overlay: &Path) -> Result<(), S
         }
         let destination = overlay_components.join(entry.file_name());
         if entry.path().is_dir() {
-            write_test_filtered_directory(&entry.path(), &destination)?;
+            write_test_filtered_directory(&entry.path(), &destination, filter_tests)?;
         } else {
             ensure_symlink(&entry.path(), &destination)?;
         }
@@ -2399,6 +3541,7 @@ fn write_cronet_component_overlay(source: &Path, overlay: &Path) -> Result<(), S
     let mut build = fs::read_to_string(source_cronet.join("BUILD.gn"))
         .map_err(display_error("read upstream Cronet BUILD.gn"))?;
     for (kind, name) in [
+        ("proto_java_library", "request_context_config_java_proto"),
         ("source_set", "cronet_common_unittests"),
         ("test", "cronet_tests"),
         ("test", "cronet_unittests"),
@@ -2417,17 +3560,77 @@ fn write_cronet_component_overlay(source: &Path, overlay: &Path) -> Result<(), S
     patch_cronet_shared_library(&mut build)?;
     append_static_gn_target(&mut build);
     fs::write(overlay_cronet.join("BUILD.gn"), build)
-        .map_err(display_error("write library-only Cronet BUILD.gn"))
+        .map_err(display_error("write library-only Cronet BUILD.gn"))?;
+    write_if_changed(
+        &overlay_cronet.join("cronet_rs_android_jni_onload.cc"),
+        r#"// Generated by cronet-rs. The C API needs Chromium's JavaVM and
+// application ClassLoader bridge on Android, but not the Cronet Java API.
+#include "base/android/jni_android.h"
+
+extern "C" __attribute__((visibility("default"))) jint JNI_OnLoad(
+    JavaVM* vm, void*) {
+  base::android::InitVM(vm);
+  return JNI_VERSION_1_6;
+}
+"#
+        .as_bytes(),
+        "write the Android native-API JNI initializer",
+    )?;
+    write_if_changed(
+        &overlay_cronet.join("cronet_rs_android_static_support.cc"),
+        r#"// Generated by cronet-rs for static Android embedding.
+#include <malloc.h>
+#include <stdlib.h>
+
+#include "base/android/jni_android.h"
+
+extern "C" __attribute__((visibility("default"))) jint
+Cronet_RS_InitializeJavaVM(JavaVM* vm) {
+  base::android::InitVM(vm);
+  return JNI_VERSION_1_6;
+}
+
+// Chromium's normal Android executable link uses --wrap for its allocator.
+// A Rust static dependency must not interpose the application's allocator, so
+// satisfy the fallback dispatch with direct bionic calls instead.
+extern "C" void* __real_malloc(size_t size) { return malloc(size); }
+extern "C" void* __real_calloc(size_t count, size_t size) {
+  return calloc(count, size);
+}
+extern "C" void* __real_realloc(void* address, size_t size) {
+  return realloc(address, size);
+}
+extern "C" void __real_free(void* address) { free(address); }
+extern "C" void* __real_memalign(size_t alignment, size_t size) {
+  return memalign(alignment, size);
+}
+extern "C" size_t __real_malloc_usable_size(void* address) {
+  return malloc_usable_size(address);
+}
+"#
+        .as_bytes(),
+        "write the static Android embedding support",
+    )
 }
 
 fn patch_cronet_shared_library(build: &mut String) -> Result<(), String> {
+    const ANDROID_GATE_MARKER: &str = "if (is_android) {\n} else {\n  _cronet_shared_lib_name";
+    const ANDROID_GATE_PATCH: &str = "if (true) {\n  _cronet_shared_lib_name";
     const MARKER: &str =
         "  shared_library(\"cronet\") {\n    output_name = _cronet_shared_lib_name";
-    const PATCH: &str = "  shared_library(\"cronet\") {\n    output_name = _cronet_shared_lib_name\n    if (is_mac) {\n      # Make a source-built dylib relocatable with the application bundle.\n      ldflags = [ \"-Wl,-install_name,@rpath/$shlib_prefix$_cronet_shared_lib_name$shlib_extension\" ]\n    }";
-    if !build.contains(MARKER) {
+    const PATCH: &str = "  shared_library(\"cronet\") {\n    output_name = _cronet_shared_lib_name\n    if (is_android) {\n      # This is a public C ABI library, not a JNI-only Chromium component.\n      # Retaining only JNI_OnLoad would also let --gc-sections discard Cronet.\n      configs -= [ \"//build/config/android:hide_all_but_jni_onload\" ]\n    }\n    if (is_apple) {\n      # Make a source-built dylib relocatable with the application bundle.\n      ldflags = [ \"-Wl,-install_name,@rpath/$shlib_prefix$_cronet_shared_lib_name$shlib_extension\" ]\n    }";
+    const SOURCE_MARKER: &str = "    sources = [ \"cronet_global_state_stubs.cc\" ]";
+    const SOURCE_PATCH: &str = "    sources = [ \"cronet_global_state_stubs.cc\" ]\n    if (is_android) {\n      # The native API still consumes Android services. Initialize Chromium's\n      # process-wide JavaVM handle when an application loads this library.\n      sources += [ \"cronet_rs_android_jni_onload.cc\" ]\n    }";
+    if !build.contains(ANDROID_GATE_MARKER)
+        || !build.contains(MARKER)
+        || !build.contains(SOURCE_MARKER)
+    {
         return Err("upstream Cronet shared-library target changed".to_owned());
     }
-    *build = build.replacen(MARKER, PATCH, 1);
+    *build = build
+        .replacen(ANDROID_GATE_MARKER, ANDROID_GATE_PATCH, 1)
+        .replacen(MARKER, PATCH, 1)
+        .replacen(SOURCE_MARKER, SOURCE_PATCH, 1);
     Ok(())
 }
 
@@ -2438,8 +3641,7 @@ fn append_static_gn_target(build: &mut String) {
 # Complete archive used by cronet-rs' `static` Cargo feature. Unlike a normal
 # GN static_library, complete_static_lib includes the transitive source sets
 # and static dependencies needed by a non-GN final linker.
-if (!is_android) {
-  static_library("cronet_static") {
+static_library("cronet_static") {
     output_name = "cronet_static_raw"
     output_dir = root_out_dir
     complete_static_lib = true
@@ -2452,8 +3654,10 @@ if (!is_android) {
     ]
 
     sources = [ "cronet_global_state_stubs.cc" ]
+    if (is_android) {
+      sources += [ "cronet_rs_android_static_support.cc" ]
+    }
     configs += [ "//build/config/compiler:no_exit_time_destructors" ]
-  }
 }
 "#,
     );
@@ -2569,17 +3773,40 @@ fn remove_gn_block_with_header(mut source: String, header: &str) -> Result<Strin
 fn remove_testonly_gn_blocks(mut source: String) -> String {
     const KINDS: &[&str] = &[
         "action",
+        "android_aidl",
+        "android_apk",
+        "android_assets",
+        "android_java_prebuilt",
         "android_library",
+        "android_nocompile_test_suite",
+        "android_resources",
+        "androidx_android_aar_prebuilt",
+        "androidx_java_group",
         "bundle_data_from_filelist",
+        "bundle_data",
         "component",
         "copy",
+        "cronet_instrumentation_test_apk",
         "executable",
         "fuzzer_test",
         "generate_jni",
+        "generate_jni_registration",
         "group",
+        "incremental_javac_prebuilt",
+        "instrumentation_test_apk",
+        "java_cpp_enum",
+        "java_group",
+        "java_library",
+        "java_prebuilt",
+        "lint_test",
         "perfetto_generate_unittests",
         "perfetto_unittest_source_set",
+        "python_library",
+        "robolectric_binary",
+        "robolectric_library",
+        "script_test",
         "shared_library",
+        "shared_library_with_jni",
         "source_set",
         "static_library",
         "target",
@@ -2606,8 +3833,18 @@ fn remove_testonly_gn_blocks(mut source: String) -> String {
                 let close = matching_gn_brace(&source, open)?;
                 let body = &source[open + 1..close];
                 let header = &source[call_start..open];
-                (matches!(kind, "fuzzer_test" | "test")
-                    || header.contains("unittest")
+                (matches!(
+                    kind,
+                    "android_nocompile_test_suite"
+                        | "cronet_instrumentation_test_apk"
+                        | "fuzzer_test"
+                        | "instrumentation_test_apk"
+                        | "lint_test"
+                        | "robolectric_binary"
+                        | "robolectric_library"
+                        | "script_test"
+                        | "test"
+                ) || header.contains("unittest")
                     || body
                         .lines()
                         .any(|line| line.trim().starts_with("testonly = true")))
@@ -2709,6 +3946,13 @@ fn ensure_symlink(target: &Path, link: &Path) -> Result<(), String> {
         {
             return Ok(());
         }
+        // Platform compatibility patches materialize selected source links as
+        // regular files. The overlay is generated state and a target change
+        // replaces it wholesale; retain those files during same-target refresh
+        // and let the patch writer below update their contents if necessary.
+        if (metadata.is_file() && target.is_file()) || (metadata.is_dir() && target.is_dir()) {
+            return Ok(());
+        }
         return Err(format!(
             "{} already exists and is not the expected Cronet overlay link",
             link.display()
@@ -2759,23 +4003,39 @@ const CRONET_DEPENDENCY_RULES: &[&str] = &[
     "src/buildtools/mac",
     "src/buildtools/win",
     "src/net/third_party/quiche/src",
+    "src/third_party/android_build_tools/*",
+    "src/third_party/android_deps/*",
+    "src/third_party/android_sdk/public",
+    "src/third_party/androidx/cipd",
+    "src/third_party/aosp_dalvik/cipd",
     "src/third_party/boringssl/src",
+    "src/third_party/catapult",
     "src/third_party/ced/src",
     "src/third_party/compiler-rt/src",
     "src/third_party/cpu_features/src",
     "src/third_party/googletest/src",
     "src/third_party/icu",
+    "src/third_party/icu4j/cipd",
+    "src/third_party/jdk/current",
     "src/third_party/jsoncpp/source",
+    "src/third_party/junit/src",
+    "src/third_party/kotlin_stdlib/cipd",
     "src/third_party/libc++/src",
     "src/third_party/libc++abi/src",
+    "src/third_party/libunwindstack",
     "src/third_party/libunwind/src",
     "src/third_party/lss",
+    "src/third_party/lzma_sdk/bin/*",
     "src/third_party/llvm-build/Release+Asserts",
     "src/third_party/llvm-libc/src",
     "src/third_party/ninja",
     "src/third_party/perfetto",
     "src/third_party/re2/src",
+    "src/third_party/r8/cipd",
+    "src/third_party/r8/d8/cipd",
     "src/third_party/rust-toolchain",
+    "src/third_party/sqlite4java/cipd",
+    "src/third_party/turbine/cipd",
     "src/third_party/zstd/src",
 ];
 
@@ -2842,11 +4102,9 @@ fn git_output(directory: &Path, args: &[&str]) -> Option<String> {
 
 fn native_output_dir(source: &Path, target: Option<&str>) -> PathBuf {
     let base = source.join("out/cronet-rs");
-    target
-        .filter(|target| is_ohos_target(target))
-        .map_or(base.clone(), |target| {
-            base.join(target.replace(|character: char| !character.is_ascii_alphanumeric(), "_"))
-        })
+    target.map_or(base.clone(), |target| {
+        base.join(target.replace(|character: char| !character.is_ascii_alphanumeric(), "_"))
+    })
 }
 
 fn native_library_exists(source: &Path, target: Option<&str>, linkage: NativeLinkage) -> bool {
@@ -2919,33 +4177,56 @@ const BUILD_SPARSE_PATTERNS: &str = r"/*
 /extensions/
 !/extensions/*/
 /extensions/buildflags/
+/ios/
+!/ios/*/
+/ios/features.gni
 /net/
 /testing/
 /third_party/
 !/third_party/*/
 /third_party/abseil-cpp/
+/third_party/android_build_tools/
+/third_party/android_deps/
+/third_party/android_sdk/
+/third_party/androidx/
+/third_party/aosp_dalvik/
 /third_party/apple_apsl/
 /third_party/boringssl/
 /third_party/brotli/
+/third_party/byte_buddy/
+/third_party/catapult/
 /third_party/ced/
 /third_party/compiler-rt/
 /third_party/cpu_features/
 /third_party/googletest/
+/third_party/google-truth/
+/third_party/hamcrest/
 /third_party/icu/
+/third_party/icu4j/
+/third_party/ijar/
+/third_party/jdk/
+/third_party/jinja2/
 /third_party/jni_zero/
 /third_party/jsoncpp/
+/third_party/junit/
+/third_party/kotlin_stdlib/
 /third_party/libc++/
 /third_party/libc++abi/
 /third_party/libevent/
+/third_party/libunwindstack/
 /third_party/libunwind/
 /third_party/lss/
+/third_party/lzma_sdk/
+/third_party/markupsafe/
 /third_party/llvm-build/
 /third_party/llvm-libc/
 /third_party/metrics_proto/
+/third_party/mockito/
 /third_party/modp_b64/
 /third_party/perfetto/
 /third_party/protobuf/
 /third_party/re2/
+/third_party/r8/
 /third_party/rust/
 !/third_party/rust/*/
 /third_party/rust/BUILD.gn
@@ -2968,6 +4249,8 @@ const BUILD_SPARSE_PATTERNS: &str = r"/*
 /third_party/rust/memchr/
 /third_party/rust/proc_macro2/
 /third_party/rust/quote/
+/third_party/rust/rustc_demangle/
+/third_party/rust/rustc_demangle_capi/
 /third_party/rust/ryu/
 /third_party/rust/serde/
 /third_party/rust/serde_core/
@@ -2979,6 +4262,8 @@ const BUILD_SPARSE_PATTERNS: &str = r"/*
 /third_party/rust/unicode_ident/
 /third_party/rust/unicode_width/
 /third_party/simdutf/
+/third_party/sqlite4java/
+/third_party/turbine/
 /third_party/rust-toolchain/
 /third_party/zlib/
 /third_party/zstd/
@@ -2996,6 +4281,10 @@ mod tests {
         assert!(cronet_dependency_allowed("src/net/third_party/quiche/src"));
         assert!(cronet_dependency_allowed("src/third_party/ninja"));
         assert!(cronet_dependency_allowed("src/third_party/lss"));
+        assert!(cronet_dependency_allowed("src/third_party/junit/src"));
+        assert!(!cronet_dependency_allowed(
+            "src/third_party/robolectric/cipd"
+        ));
         assert!(!cronet_dependency_allowed("src/buildtools/reclient"));
         assert!(cronet_dependency_allowed(
             "src/build/linux/debian_bullseye_amd64-sysroot"
@@ -3009,8 +4298,15 @@ mod tests {
         let targets = [
             "x86_64-unknown-linux-gnu",
             "aarch64-unknown-linux-gnu",
+            "i686-linux-android",
+            "x86_64-linux-android",
+            "armv7-linux-androideabi",
+            "aarch64-linux-android",
             "x86_64-apple-darwin",
             "aarch64-apple-darwin",
+            "x86_64-apple-ios",
+            "aarch64-apple-ios",
+            "aarch64-apple-ios-sim",
             "x86_64-pc-windows-msvc",
             "aarch64-pc-windows-msvc",
             "armv7-unknown-linux-ohos",
@@ -3023,6 +4319,38 @@ mod tests {
             assert!(arguments[1].starts_with("target_cpu="));
         }
         assert!(gn_target_args("wasm32-unknown-unknown").is_err());
+    }
+
+    #[test]
+    fn maps_all_android_compiler_runtimes() {
+        let cases = [
+            (
+                "aarch64-linux-android",
+                "libclang_rt.builtins-aarch64-android.a",
+                "aarch64-unknown-linux-android23",
+            ),
+            (
+                "armv7-linux-androideabi",
+                "libclang_rt.builtins-arm-android.a",
+                "arm-unknown-linux-android23",
+            ),
+            (
+                "x86_64-linux-android",
+                "libclang_rt.builtins-x86_64-android.a",
+                "x86_64-unknown-linux-android23",
+            ),
+            (
+                "i686-linux-android",
+                "libclang_rt.builtins-i686-android.a",
+                "i686-unknown-linux-android23",
+            ),
+        ];
+        for (target, archive, directory) in cases {
+            assert_eq!(
+                android_compiler_runtime(target, 23).unwrap(),
+                (archive, directory.to_owned())
+            );
+        }
     }
 
     #[test]

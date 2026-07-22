@@ -17,3 +17,10 @@
 )]
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+
+#[cfg(all(target_os = "android", feature = "static"))]
+unsafe extern "C" {
+    /// Initializes Chromium's process-wide Java VM bridge for static Android
+    /// embedding. Call this exactly once from the final library's JNI_OnLoad.
+    pub fn Cronet_RS_InitializeJavaVM(vm: *mut std::ffi::c_void) -> std::ffi::c_int;
+}
