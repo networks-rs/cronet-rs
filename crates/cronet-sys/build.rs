@@ -24,6 +24,8 @@ fn main() {
         "ANDROID_API_LEVEL",
         "DEVELOPER_DIR",
         "IPHONEOS_DEPLOYMENT_TARGET",
+        "CRONET_CLANG_DIR",
+        "CRONET_RUST_BINDGEN",
         "RUSTC",
     ] {
         println!("cargo:rerun-if-env-changed={variable}");

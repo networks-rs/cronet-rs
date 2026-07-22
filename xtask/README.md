@@ -14,6 +14,14 @@ complete source tree, and compiles Cronet. Source selection is:
 No prebuilt Cronet library is downloaded or accepted. `CRONET_CACHE_DIR`
 changes the persistent source cache location.
 
+Chromium 146 does not publish its pinned Linux compiler or Rust host tools for
+ARM64. A native `aarch64-unknown-linux-gnu` build therefore uses an installed
+LLVM 22 toolchain selected with `Build::clang_dir` or `CRONET_CLANG_DIR`, the
+Rust sysroot reported by `RUSTC`, and a host-native bindgen 0.72 selected with
+`Build::rust_bindgen`, `CRONET_RUST_BINDGEN`, or `PATH`. This remains a native
+build: the host and target are both ARM64, and no target sysroot or emulator is
+introduced.
+
 For OpenHarmony, select a complete Native SDK with
 `Build::ohos_sdk_native`, `OHOS_SDK_NATIVE`, or `OHOS_NDK_HOME`. The builder
 supports `armv7-unknown-linux-ohos`, `aarch64-unknown-linux-ohos`, and
