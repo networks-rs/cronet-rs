@@ -5,6 +5,10 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -91,16 +95,31 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add "${{ matrix.target }}"
-      - name: Install Android SDK and NDK
+      - name: Set up JDK for Android SDK tools
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK and NDK
+        # v4.0.1; pin the community action because it downloads and executes
+        # Android command-line tools before the repository build begins.
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699
+        with:
+          cmdline-tools-version: 12266719
+          log-accepted-android-sdk-licenses: false
+          packages: >-
+            platform-tools
+            build-tools;35.0.0
+            platforms;android-35
+            ndk;27.1.12297006
+      - name: Export the pinned Android NDK
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
-            'build-tools;35.0.0' \
-            'ndk;27.1.12297006' \
-            'platform-tools' \
-            'platforms;android-35'
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.1.12297006" >> "$GITHUB_ENV"
+          sdk_root=${ANDROID_SDK_ROOT:-${ANDROID_HOME:?Android SDK root was not exported}}
+          ndk="$sdk_root/ndk/27.1.12297006"
+          test -f "$ndk/source.properties"
+          echo "ANDROID_SDK_ROOT=$sdk_root" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
       - name: Synchronize only the pinned Cronet source closure
         run: cargo xtask sync --target "${{ matrix.target }}"
       - name: Build shared and static Cronet

@@ -441,6 +441,28 @@ fn build(args: &[std::ffi::OsString]) -> Result<(), String> {
     build_native(options, PlatformConfig::default())
 }
 
+fn common_gn_args(release: bool) -> Vec<String> {
+    vec![
+        format!("is_debug={}", !release),
+        "is_component_build=false".to_owned(),
+        "is_cronet_build=true".to_owned(),
+        "enable_disk_cache_sql_backend=false".to_owned(),
+        "enable_device_bound_sessions=false".to_owned(),
+        "enable_perfetto_trace_processor_sqlite=false".to_owned(),
+        "use_platform_icu_alternatives=false".to_owned(),
+        // Standalone Cronet has no Chromium UI tree. On desktop Linux the
+        // upstream default otherwise adds //ui/base/glib to //net.
+        "use_glib=false".to_owned(),
+        // Keep the build compatible with older Xcode SDKs that predate the
+        // split DarwinFoundation{1,2,3}.modulemap files.
+        "use_clang_modules=false".to_owned(),
+        "use_remoteexec=false".to_owned(),
+        "use_siso=false".to_owned(),
+        "treat_warnings_as_errors=false".to_owned(),
+        "symbol_level=1".to_owned(),
+    ]
+}
+
 #[allow(clippy::too_many_lines)] // Native GN configuration and packaging form one atomic build transaction.
 fn build_native(options: BuildOptions, platform: PlatformConfig<'_>) -> Result<(), String> {
     let source = options
@@ -461,22 +483,7 @@ fn build_native(options: BuildOptions, platform: PlatformConfig<'_>) -> Result<(
     let out_dir = native_output_dir(&source, options.target.as_deref());
     let overlay = write_cronet_overlay(&source, options.target.as_deref())?;
     let overlay_out_dir = native_output_dir(&overlay, options.target.as_deref());
-    let mut gn_args = vec![
-        format!("is_debug={}", !options.release),
-        "is_component_build=false".to_owned(),
-        "is_cronet_build=true".to_owned(),
-        "enable_disk_cache_sql_backend=false".to_owned(),
-        "enable_device_bound_sessions=false".to_owned(),
-        "enable_perfetto_trace_processor_sqlite=false".to_owned(),
-        "use_platform_icu_alternatives=false".to_owned(),
-        // Keep the build compatible with older Xcode SDKs that predate the
-        // split DarwinFoundation{1,2,3}.modulemap files.
-        "use_clang_modules=false".to_owned(),
-        "use_remoteexec=false".to_owned(),
-        "use_siso=false".to_owned(),
-        "treat_warnings_as_errors=false".to_owned(),
-        "symbol_level=1".to_owned(),
-    ];
+    let mut gn_args = common_gn_args(options.release);
     if let Some(target) = options.target.as_deref() {
         gn_args.extend(gn_target_args(target)?);
         if is_ohos_target(target) {
@@ -1946,7 +1953,7 @@ fn write_gclient(chromium_root: &Path, target: Option<&str>) -> Result<(), Strin
         filter.arg(rule);
     }
     run_command(&mut filter, "generate the Cronet-only dependency manifest")?;
-    patch_android_clang_dependency(&chromium_root.join("src/DEPS.cronet"))?;
+    patch_android_clang_dependency(&chromium_root.join("src/DEPS.cronet"), target)?;
 
     let target_os = match target {
         Some(target) if is_android_target(target) => "['android']",
@@ -1972,10 +1979,13 @@ fn write_gclient(chromium_root: &Path, target: Option<&str>) -> Result<(), Strin
     fs::write(chromium_root.join(".gclient"), contents).map_err(display_error("write .gclient"))
 }
 
-fn patch_android_clang_dependency(manifest: &Path) -> Result<(), String> {
+fn patch_android_clang_dependency(manifest: &Path, target: Option<&str>) -> Result<(), String> {
     const MARKER: &str =
         "'condition': '(host_os == \"linux\" or checkout_android) and non_git_source',";
     const PATCH: &str = "'condition': 'host_os == \"linux\" and non_git_source',";
+    if !target.is_some_and(is_android_target) {
+        return Ok(());
+    }
     let mut contents = fs::read_to_string(manifest).map_err(display_error(
         "read the filtered Cronet dependency manifest",
     ))?;
@@ -4319,6 +4329,33 @@ mod tests {
             assert!(arguments[1].starts_with("target_cpu="));
         }
         assert!(gn_target_args("wasm32-unknown-unknown").is_err());
+    }
+
+    #[test]
+    fn skips_android_dependency_rewrites_for_desktop_and_ios_syncs() {
+        let nonexistent = Path::new("this-manifest-must-not-be-opened");
+        for target in [
+            None,
+            Some("x86_64-pc-windows-msvc"),
+            Some("aarch64-pc-windows-msvc"),
+            Some("aarch64-apple-ios-sim"),
+        ] {
+            patch_android_clang_dependency(nonexistent, target).unwrap();
+        }
+        assert!(
+            patch_android_clang_dependency(nonexistent, Some("aarch64-linux-android")).is_err()
+        );
+    }
+
+    #[test]
+    fn standalone_build_disables_the_chromium_ui_glib_dependency() {
+        let arguments = common_gn_args(true);
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument == "use_glib=false")
+        );
+        assert!(!arguments.iter().any(|argument| argument == "use_glib=true"));
     }
 
     #[test]
