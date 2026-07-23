@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::Write,
     path::{Path, PathBuf},
@@ -284,6 +284,7 @@ fn run() -> Result<(), String> {
         Some("vendor-source") => vendor_source(&rest),
         Some("doctor") => doctor(&rest),
         Some("print-env") => print_env(&rest),
+        Some("audit-e2e") => audit_e2e(&rest),
         Some("help" | "-h" | "--help") | None => {
             usage();
             Ok(())
@@ -302,11 +303,173 @@ fn usage() {
            cargo xtask build [--release] [--linkage dynamic|static|both] [--target TARGET] [--source-dir PATH] [--gn-arg ARG]...\n\
            cargo xtask vendor-source [--source-dir PATH] [--output PATH]\n\
            cargo xtask doctor [--source-dir PATH]\n\
-           cargo xtask print-env [--source-dir PATH]\n\n\
+           cargo xtask print-env [--source-dir PATH]\n\
+           cargo xtask audit-e2e\n\n\
          `sync` uses a blobless sparse checkout pinned immediately before the\n\
          upstream native API was deleted. `--api-only` fetches just the public\n\
          C API and is enough for cargo check with CRONET_SYS_NO_LINK=1."
     );
+}
+
+/// Fails when a public safe-binding function has no named runtime scenario.
+///
+/// The manifest intentionally lives outside the Rust sources. Adding an API
+/// therefore requires an explicit test mapping in the same change instead of
+/// silently inheriting a broad documentation claim.
+fn audit_e2e(args: &[std::ffi::OsString]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("audit-e2e does not accept options".to_owned());
+    }
+    let root = workspace_root();
+    let expected = public_safe_api(&root)?;
+    let manifest_path = root.join("tests/e2e-coverage.tsv");
+    let manifest = fs::read_to_string(&manifest_path)
+        .map_err(display_error("read the safe API E2E coverage manifest"))?;
+    let mut mapped = BTreeMap::<String, String>::new();
+    for (index, line) in manifest.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (api, scenario) = line.split_once('\t').ok_or_else(|| {
+            format!(
+                "{}:{} must contain API<TAB>SCENARIO",
+                manifest_path.display(),
+                index + 1
+            )
+        })?;
+        if api.is_empty() || scenario.is_empty() || scenario.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "{}:{} has an invalid API or scenario",
+                manifest_path.display(),
+                index + 1
+            ));
+        }
+        if mapped.insert(api.to_owned(), scenario.to_owned()).is_some() {
+            return Err(format!("duplicate E2E mapping for `{api}`"));
+        }
+    }
+
+    let mapped_apis = mapped.keys().cloned().collect::<BTreeSet<_>>();
+    let missing = expected
+        .difference(&mapped_apis)
+        .cloned()
+        .collect::<Vec<_>>();
+    let stale = mapped_apis
+        .difference(&expected)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() || !stale.is_empty() {
+        return Err(format!(
+            "safe API E2E manifest is out of date\nmissing:\n  {}\nstale:\n  {}",
+            missing.join("\n  "),
+            stale.join("\n  ")
+        ));
+    }
+
+    let mut test_sources = String::new();
+    collect_test_sources(&root.join("tests"), &mut test_sources)?;
+    collect_test_sources(&root.join("crates/cronet/tests"), &mut test_sources)?;
+    let missing_scenarios = mapped
+        .values()
+        .filter(|scenario| !test_sources.contains(scenario.as_str()))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !missing_scenarios.is_empty() {
+        return Err(format!(
+            "E2E manifest references scenarios absent from test sources:\n  {}",
+            missing_scenarios
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        ));
+    }
+    println!(
+        "E2E coverage manifest maps all {} public safe functions",
+        expected.len()
+    );
+    Ok(())
+}
+
+fn public_safe_api(root: &Path) -> Result<BTreeSet<String>, String> {
+    let source = root.join("crates/cronet/src");
+    let mut api = BTreeSet::new();
+    for file in [
+        "bidirectional.rs",
+        "engine.rs",
+        "request.rs",
+        "types.rs",
+        "lib.rs",
+    ] {
+        let contents = fs::read_to_string(source.join(file))
+            .map_err(display_error("read a safe-binding source file"))?;
+        api.extend(public_functions_in_source(file, &contents));
+    }
+    Ok(api)
+}
+
+fn public_functions_in_source(file: &str, source: &str) -> BTreeSet<String> {
+    let mut functions = BTreeSet::new();
+    let mut inherent_impl = None::<String>;
+    for line in source.lines() {
+        if line.starts_with("impl ") && line.ends_with(" {") && !line.contains(" for ") {
+            let candidate = line
+                .trim_start_matches("impl ")
+                .trim_end_matches(" {")
+                .trim();
+            if !candidate.contains(['<', '>', ' ']) {
+                inherent_impl = Some(candidate.to_owned());
+            }
+        }
+        if let Some(name) = public_function_name(line.trim()) {
+            let qualified = if let Some(owner) = &inherent_impl {
+                format!("{owner}::{name}")
+            } else if file == "lib.rs" && line.starts_with("    ") {
+                format!("android::{name}")
+            } else {
+                name.to_owned()
+            };
+            functions.insert(qualified);
+        }
+        if line == "}" {
+            inherent_impl = None;
+        }
+    }
+    functions
+}
+
+fn public_function_name(line: &str) -> Option<&str> {
+    let mut remainder = line.strip_prefix("pub ")?;
+    loop {
+        let next = ["async ", "const ", "unsafe "]
+            .into_iter()
+            .find_map(|qualifier| remainder.strip_prefix(qualifier));
+        let Some(next) = next else { break };
+        remainder = next;
+    }
+    let remainder = remainder.strip_prefix("fn ")?;
+    let end = remainder.find(['(', '<'])?;
+    Some(&remainder[..end])
+}
+
+fn collect_test_sources(directory: &Path, output: &mut String) -> Result<(), String> {
+    for entry in fs::read_dir(directory).map_err(display_error("list E2E test sources"))? {
+        let entry = entry.map_err(display_error("read an E2E test source entry"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().and_then(|name| name.to_str()) != Some("target") {
+                collect_test_sources(&path, output)?;
+            }
+        } else if matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("rs" | "sh" | "kt" | "swift" | "m")
+        ) {
+            output.push_str(
+                &fs::read_to_string(&path).map_err(display_error("read an E2E test source"))?,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Ensures that a release Cronet library exists for `target`, synchronizing
@@ -621,7 +784,7 @@ fn build_native(options: BuildOptions, platform: PlatformConfig<'_>) -> Result<(
         install_android_support_dex(&overlay_out_dir, &out_dir)?;
     }
     if options.linkage.linkages().contains(&NativeLinkage::Static) {
-        bundle_static_archive(&source, &out_dir)?;
+        bundle_static_archive(&source, &overlay_out_dir, &out_dir)?;
         write_static_link_manifest(
             &gn,
             &depot_tools,
@@ -660,13 +823,14 @@ fn install_android_support_dex(build_dir: &Path, output_dir: &Path) -> Result<()
     )
 }
 
-fn bundle_static_archive(source: &Path, output_dir: &Path) -> Result<(), String> {
+#[allow(clippy::too_many_lines)] // Archive discovery, MRI assembly, and symbol isolation are one transaction.
+fn bundle_static_archive(source: &Path, build_dir: &Path, output_dir: &Path) -> Result<(), String> {
     let raw_name = native_static_archive_name("cronet_static_raw");
     let bundled_name = native_static_archive_name("cronet_static");
-    let raw_archive = output_dir.join(raw_name);
+    let raw_archive = build_dir.join(raw_name);
     require_file(&raw_archive, "build the Cronet static GN target first")?;
 
-    let ninja_file = output_dir.join("obj/components/cronet/cronet_static.ninja");
+    let ninja_file = build_dir.join("obj/components/cronet/cronet_static.ninja");
     let ninja = fs::read_to_string(&ninja_file)
         .map_err(display_error("read Cronet static Ninja target"))?;
     let rust_archives = ninja
@@ -685,19 +849,28 @@ fn bundle_static_archive(source: &Path, output_dir: &Path) -> Result<(), String>
         "obj/buildtools/third_party/libc++abi/libc++abi.a",
         "obj/buildtools/third_party/libc++abi/libc++abi.lib",
     ] {
-        let archive = output_dir.join(relative);
+        let archive = build_dir.join(relative);
         if archive.is_file() {
             archives.push(archive);
         }
     }
     for relative in rust_archives.split_ascii_whitespace() {
-        let archive = output_dir.join(relative);
+        if is_chromium_rust_allocator_shim(relative) {
+            // cronet-src is a Rust native dependency, so the final Cargo
+            // artifact supplies these lang-item allocator symbols. Bundling
+            // Chromium's executable-oriented shim as well causes duplicate
+            // `__rust_alloc*` definitions on strict ELF linkers such as OHOS
+            // lld. Other Chromium Rust rlibs, including the allocation-error
+            // C++ bridge, remain part of the complete archive.
+            continue;
+        }
+        let archive = build_dir.join(relative);
         require_file(&archive, "the GN Rust dependency must be built")?;
         archives.push(archive);
     }
 
     let temporary_name = format!(".{bundled_name}.{}", std::process::id());
-    let temporary = output_dir.join(&temporary_name);
+    let temporary = build_dir.join(&temporary_name);
     if temporary.exists() {
         fs::remove_file(&temporary).map_err(display_error("replace static archive temporary"))?;
     }
@@ -711,7 +884,7 @@ fn bundle_static_archive(source: &Path, output_dir: &Path) -> Result<(), String>
     require_file(&llvm_ar, "run `cargo xtask sync` first")?;
     let mut child = Command::new(&llvm_ar)
         .arg("-M")
-        .current_dir(output_dir)
+        .current_dir(build_dir)
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|error| format!("could not start llvm-ar: {error}"))?;
@@ -723,11 +896,11 @@ fn bundle_static_archive(source: &Path, output_dir: &Path) -> Result<(), String>
         writeln!(input, "create {temporary_name}")
             .map_err(display_error("write llvm-ar MRI command"))?;
         for archive in &archives {
-            let relative = archive.strip_prefix(output_dir).map_err(|_| {
+            let relative = archive.strip_prefix(build_dir).map_err(|_| {
                 format!(
                     "static dependency {} is outside {}",
                     archive.display(),
-                    output_dir.display()
+                    build_dir.display()
                 )
             })?;
             writeln!(input, "addlib {}", relative.display())
@@ -769,6 +942,17 @@ fn bundle_static_archive(source: &Path, output_dir: &Path) -> Result<(), String>
             .map_err(display_error("start llvm-objcopy for the static archive"))?,
         "isolate Chromium's Rust panic personality",
     )
+}
+
+fn is_chromium_rust_allocator_shim(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    path.rsplit_once('/').is_some_and(|(directory, file)| {
+        directory.ends_with("obj/build/rust/allocator")
+            && file.starts_with("liballocator_")
+            && Path::new(file)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("rlib"))
+    })
 }
 
 fn native_static_archive_name(stem: &str) -> String {
@@ -1629,6 +1813,11 @@ fn ohos_gn_args(
         "use_custom_libcxx=true".to_owned(),
         "use_custom_libcxx_for_host=true".to_owned(),
         "clang_use_chrome_plugins=false".to_owned(),
+        // Restored build caches can contain host PCH files whose embedded
+        // Chromium Clang-header mtimes predate a source/dependency refresh.
+        // Clang rejects those before Ninja can repair the cross-toolchain
+        // action, so keep the portable source build independent of host PCHs.
+        "enable_precompiled_headers=false".to_owned(),
         "use_dbus=false".to_owned(),
         "use_gio=false".to_owned(),
         "use_glib=false".to_owned(),
@@ -2367,6 +2556,7 @@ fn write_cronet_overlay(source: &Path, target: Option<&str>) -> Result<PathBuf, 
     ensure_symlink(&source_out, &overlay.join("out"))?;
     let filter_tests = true;
     write_build_overlay(&source, &overlay, filter_tests)?;
+    patch_bindgen_rustfmt_overlay(&source, &overlay)?;
     write_buildtools_overlay(&source, &overlay)?;
     write_platform_overlay(&source, &overlay)?;
     for directory in ["base", "crypto", "net", "url"] {
@@ -2379,6 +2569,7 @@ fn write_cronet_overlay(source: &Path, target: Option<&str>) -> Result<PathBuf, 
     patch_ios_base_features(&source, &overlay, target)?;
     patch_ohos_partition_alloc(&source, &overlay)?;
     patch_ohos_base_process(&source, &overlay)?;
+    patch_ohos_fd_close_interposer(&source, &overlay)?;
     patch_ohos_resolver(&source, &overlay)?;
     patch_ohos_link_closure(&source, &overlay)?;
     patch_android_ndk_compat(&source, &overlay, target)?;
@@ -3086,6 +3277,61 @@ fn write_build_overlay(source: &Path, overlay: &Path, filter_tests: bool) -> Res
     )
 }
 
+fn patch_bindgen_rustfmt_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
+    let source_rust = source.join("build/rust");
+    let overlay_rust = overlay.join("build/rust");
+    replace_generated_link_with_directory(&overlay_rust)?;
+    for entry in fs::read_dir(&source_rust).map_err(display_error("list Chromium Rust build"))? {
+        let entry = entry.map_err(display_error("read a Chromium Rust build entry"))?;
+        if entry.file_name() != "gni_impl" {
+            ensure_symlink(&entry.path(), &overlay_rust.join(entry.file_name()))?;
+        }
+    }
+
+    let source_impl = source_rust.join("gni_impl");
+    let overlay_impl = overlay_rust.join("gni_impl");
+    replace_generated_link_with_directory(&overlay_impl)?;
+    for entry in
+        fs::read_dir(&source_impl).map_err(display_error("list Chromium Rust GN helpers"))?
+    {
+        let entry = entry.map_err(display_error("read a Chromium Rust GN helper entry"))?;
+        if entry.file_name() != "run_bindgen.py" {
+            ensure_symlink(&entry.path(), &overlay_impl.join(entry.file_name()))?;
+        }
+    }
+
+    let script = fs::read_to_string(source_impl.join("run_bindgen.py"))
+        .map_err(display_error("read Chromium bindgen runner"))?;
+    let script = patch_bindgen_rustfmt_invocation(&script)?;
+    write_if_changed(
+        &overlay_impl.join("run_bindgen.py"),
+        script.as_bytes(),
+        "write the overlay-safe bindgen runner",
+    )?;
+    write_if_changed(
+        &overlay_impl.join("cronet_rs_rustfmt.toml"),
+        b"normalize_doc_attributes = true\n",
+        "write the overlay-local rustfmt configuration",
+    )
+}
+
+fn patch_bindgen_rustfmt_invocation(script: &str) -> Result<String, String> {
+    const MARKER: &str = r#"      fmtargs = [
+          args.output,
+          "--config=normalize_doc_attributes=true",
+      ]"#;
+    const PATCH: &str = r#"      fmtargs = [
+          args.output,
+          "--config-path=" + os.path.join(
+              os.path.dirname(__file__), "cronet_rs_rustfmt.toml"),
+          "--config=normalize_doc_attributes=true",
+      ]"#;
+    if !script.contains(MARKER) {
+        return Err("Chromium changed its bindgen rustfmt invocation".to_owned());
+    }
+    Ok(script.replacen(MARKER, PATCH, 1))
+}
+
 fn write_buildtools_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
     const MUSL_MARKER: &str = "#define _LIBCPP_HAS_MUSL_LIBC 0";
     const MUSL_PATCH: &str = "#if defined(__OHOS__)\n#define _LIBCPP_HAS_MUSL_LIBC 1\n#else\n#define _LIBCPP_HAS_MUSL_LIBC 0\n#endif";
@@ -3212,6 +3458,33 @@ fn patch_ohos_base_process(source: &Path, overlay: &Path) -> Result<(), String> 
         contents.as_bytes(),
         "write the portable process-title implementation",
     )
+}
+
+fn patch_ohos_fd_close_interposer(source: &Path, overlay: &Path) -> Result<(), String> {
+    const RELATIVE: &str = "base/files/scoped_file_linux.cc";
+    let contents = fs::read_to_string(source.join(RELATIVE))
+        .map_err(display_error("read Chromium file-descriptor interposer"))?;
+    let patched = patch_ohos_fd_close_interposer_source(&contents)?;
+    let overlay_path = overlay.join(RELATIVE);
+    replace_generated_link_with_file(&overlay_path)?;
+    write_if_changed(
+        &overlay_path,
+        patched.as_bytes(),
+        "disable the Chromium close interposer on OHOS",
+    )
+}
+
+fn patch_ohos_fd_close_interposer_source(contents: &str) -> Result<String, String> {
+    const MARKER: &str = "#if !defined(COMPONENT_BUILD)\nusing LibcCloseFuncPtr = int (*)(int);";
+    const PATCH: &str = "// OHOS does not provide a usable RTLD_NEXT lookup for close() when Cronet\n\
+                         // is embedded into another shared object from a static archive. Let libc own\n\
+                         // the process symbol while retaining ScopedFD ownership bookkeeping.\n\
+                         #if !defined(COMPONENT_BUILD) && !defined(__OHOS__)\n\
+                         using LibcCloseFuncPtr = int (*)(int);";
+    if !contents.contains(MARKER) {
+        return Err("Chromium changed around its Linux close interposer".to_owned());
+    }
+    Ok(contents.replacen(MARKER, PATCH, 1))
 }
 
 #[allow(clippy::too_many_lines)] // Exact upstream anchors and the generated OHOS implementation stay together.
@@ -4556,6 +4829,92 @@ const BUILD_SPARSE_PATTERNS: &str = r"/*
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_qualified_public_safe_functions() {
+        let source = r"
+pub struct Example;
+impl Example {
+    pub fn plain(&self) {}
+    pub async fn asynchronous(&self) {}
+    pub const fn constant() {}
+    pub unsafe fn unsafe_entry() {}
+    pub(crate) fn internal() {}
+}
+impl Default for Example {
+    fn default() -> Self { Self }
+}
+";
+        assert_eq!(
+            public_functions_in_source("example.rs", source),
+            [
+                "Example::asynchronous",
+                "Example::constant",
+                "Example::plain",
+                "Example::unsafe_entry",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+    }
+
+    #[test]
+    fn recognizes_the_cfg_gated_android_entry() {
+        let source = r"
+pub mod android {
+    pub unsafe fn initialize_java_vm(pointer: *mut ()) -> i32 { 0 }
+}
+";
+        assert_eq!(
+            public_functions_in_source("lib.rs", source),
+            ["android::initialize_java_vm".to_owned()]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn excludes_only_the_chromium_rust_allocator_shim_from_static_bundles() {
+        assert!(is_chromium_rust_allocator_shim(
+            "obj/build/rust/allocator/liballocator_6ead5877.rlib"
+        ));
+        assert!(is_chromium_rust_allocator_shim(
+            r"obj\build\rust\allocator\liballocator_6ead5877.rlib"
+        ));
+        assert!(!is_chromium_rust_allocator_shim(
+            "obj/build/rust/allocator/liballoc_error_handler_impl_ffi.rlib"
+        ));
+        assert!(!is_chromium_rust_allocator_shim(
+            "obj/other/liballocator_6ead5877.rlib"
+        ));
+    }
+
+    #[test]
+    fn gives_overlay_bindgen_an_overlay_local_rustfmt_config() {
+        let source = r#"before
+      fmtargs = [
+          args.output,
+          "--config=normalize_doc_attributes=true",
+      ]
+after"#;
+        let patched = patch_bindgen_rustfmt_invocation(source).unwrap();
+        assert!(patched.contains("cronet_rs_rustfmt.toml"));
+        assert!(patched.contains("os.path.dirname(__file__)"));
+        assert!(patch_bindgen_rustfmt_invocation("changed").is_err());
+    }
+
+    #[test]
+    fn disables_the_process_wide_close_interposer_only_on_ohos() {
+        let source =
+            "before\n#if !defined(COMPONENT_BUILD)\nusing LibcCloseFuncPtr = int (*)(int);\nafter";
+        let patched = patch_ohos_fd_close_interposer_source(source).unwrap();
+        assert!(patched.contains(
+            "#if !defined(COMPONENT_BUILD) && !defined(__OHOS__)\nusing LibcCloseFuncPtr"
+        ));
+        assert!(patched.contains("retaining ScopedFD ownership bookkeeping"));
+        assert!(patch_ohos_fd_close_interposer_source("changed").is_err());
+    }
 
     #[test]
     fn keeps_cronet_deps_and_rejects_browser_deps() {

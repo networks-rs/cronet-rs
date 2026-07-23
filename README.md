@@ -359,6 +359,7 @@ cargo xtask sync --api-only
 CRONET_SYS_NO_LINK=1 cargo fmt --all -- --check
 CRONET_SYS_NO_LINK=1 cargo clippy --workspace --all-targets -- -D warnings
 CRONET_SYS_NO_LINK=1 cargo check --workspace --all-targets
+cargo xtask audit-e2e
 ```
 
 After a native build, both real link modes and the full safe API can be
@@ -373,6 +374,14 @@ cargo test -p cronet --features static,native-tests --test e2e_local -- --test-t
 cargo test -p cronet --features network-tests --test e2e_network -- --test-threads=1
 cargo run -p cronet --features native-example --example get
 ```
+
+The API audit requires every public safe function to name a concrete runtime
+scenario. Desktop, Android, iOS, and OpenHarmony runners compile the shared
+[`portable_e2e.rs`](crates/cronet/tests/support/portable_e2e.rs) suite;
+cache/NetLog and public
+HTTP/2/HTTP/3 tests add the platform/protocol-specific cases. The full safety
+contract and scenario dimensions are documented in
+[`docs/e2e-safety.md`](docs/e2e-safety.md).
 
 Set `CRONET_E2E_REQUIRE_QUIC=1` when the test network permits UDP/443 and QUIC
 fallback must fail the build. The source-build workflow uses this strict mode

@@ -3,7 +3,8 @@
   "buildOption": {},
   "targets": [
     {
-      "name": "default"
+      "name": "default",
+      "runtimeOS": "OpenHarmony"
     }
   ]
 }

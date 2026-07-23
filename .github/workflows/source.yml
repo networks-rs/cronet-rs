@@ -236,5 +236,7 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+      - name: Require an E2E scenario for every public safe API
+        run: cargo xtask audit-e2e
       - name: Check crate contents and metadata
         run: cargo package --workspace --allow-dirty --no-verify

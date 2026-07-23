@@ -274,4 +274,191 @@ mod tests {
     fn preserves_unknown_result_code() {
         assert_eq!(ResultCode::from_raw(-999), Some(ResultCode::Unknown(-999)));
     }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the exhaustive native result-code table is clearer kept in one place"
+    )]
+    fn maps_every_native_result_code() {
+        let cases = [
+            (
+                sys::Cronet_RESULT_ILLEGAL_ARGUMENT,
+                ResultCode::IllegalArgument,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_ARGUMENT_STORAGE_PATH_MUST_EXIST,
+                ResultCode::StoragePathMustExist,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_ARGUMENT_INVALID_PIN,
+                ResultCode::InvalidPin,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_ARGUMENT_INVALID_HOSTNAME,
+                ResultCode::InvalidHostname,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_ARGUMENT_INVALID_HTTP_METHOD,
+                ResultCode::InvalidHttpMethod,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_ARGUMENT_INVALID_HTTP_HEADER,
+                ResultCode::InvalidHttpHeader,
+            ),
+            (sys::Cronet_RESULT_ILLEGAL_STATE, ResultCode::IllegalState),
+            (
+                sys::Cronet_RESULT_ILLEGAL_STATE_STORAGE_PATH_IN_USE,
+                ResultCode::StoragePathInUse,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_STATE_CANNOT_SHUTDOWN_ENGINE_FROM_NETWORK_THREAD,
+                ResultCode::ShutdownFromNetworkThread,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_STATE_ENGINE_ALREADY_STARTED,
+                ResultCode::EngineAlreadyStarted,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_STATE_REQUEST_ALREADY_STARTED,
+                ResultCode::RequestAlreadyStarted,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_STATE_REQUEST_NOT_INITIALIZED,
+                ResultCode::RequestNotInitialized,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_STATE_REQUEST_ALREADY_INITIALIZED,
+                ResultCode::RequestAlreadyInitialized,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_STATE_REQUEST_NOT_STARTED,
+                ResultCode::RequestNotStarted,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_STATE_UNEXPECTED_REDIRECT,
+                ResultCode::UnexpectedRedirect,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_STATE_UNEXPECTED_READ,
+                ResultCode::UnexpectedRead,
+            ),
+            (
+                sys::Cronet_RESULT_ILLEGAL_STATE_READ_FAILED,
+                ResultCode::ReadFailed,
+            ),
+            (sys::Cronet_RESULT_NULL_POINTER, ResultCode::NullPointer),
+            (
+                sys::Cronet_RESULT_NULL_POINTER_HOSTNAME,
+                ResultCode::NullHostname,
+            ),
+            (
+                sys::Cronet_RESULT_NULL_POINTER_SHA256_PINS,
+                ResultCode::NullPins,
+            ),
+            (
+                sys::Cronet_RESULT_NULL_POINTER_EXPIRATION_DATE,
+                ResultCode::NullExpirationDate,
+            ),
+            (
+                sys::Cronet_RESULT_NULL_POINTER_ENGINE,
+                ResultCode::NullEngine,
+            ),
+            (sys::Cronet_RESULT_NULL_POINTER_URL, ResultCode::NullUrl),
+            (
+                sys::Cronet_RESULT_NULL_POINTER_CALLBACK,
+                ResultCode::NullCallback,
+            ),
+            (
+                sys::Cronet_RESULT_NULL_POINTER_EXECUTOR,
+                ResultCode::NullExecutor,
+            ),
+            (
+                sys::Cronet_RESULT_NULL_POINTER_METHOD,
+                ResultCode::NullMethod,
+            ),
+            (
+                sys::Cronet_RESULT_NULL_POINTER_HEADER_NAME,
+                ResultCode::NullHeaderName,
+            ),
+            (
+                sys::Cronet_RESULT_NULL_POINTER_HEADER_VALUE,
+                ResultCode::NullHeaderValue,
+            ),
+            (
+                sys::Cronet_RESULT_NULL_POINTER_PARAMS,
+                ResultCode::NullParams,
+            ),
+            (
+                sys::Cronet_RESULT_NULL_POINTER_REQUEST_FINISHED_INFO_LISTENER_EXECUTOR,
+                ResultCode::NullFinishedListenerExecutor,
+            ),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(ResultCode::from_raw(raw), Some(expected));
+        }
+    }
+
+    #[test]
+    fn maps_every_native_network_error_code() {
+        let cases = [
+            (
+                sys::Cronet_Error_ERROR_CODE_ERROR_CALLBACK,
+                NetworkErrorCode::Callback,
+            ),
+            (
+                sys::Cronet_Error_ERROR_CODE_ERROR_HOSTNAME_NOT_RESOLVED,
+                NetworkErrorCode::HostnameNotResolved,
+            ),
+            (
+                sys::Cronet_Error_ERROR_CODE_ERROR_INTERNET_DISCONNECTED,
+                NetworkErrorCode::InternetDisconnected,
+            ),
+            (
+                sys::Cronet_Error_ERROR_CODE_ERROR_NETWORK_CHANGED,
+                NetworkErrorCode::NetworkChanged,
+            ),
+            (
+                sys::Cronet_Error_ERROR_CODE_ERROR_TIMED_OUT,
+                NetworkErrorCode::TimedOut,
+            ),
+            (
+                sys::Cronet_Error_ERROR_CODE_ERROR_CONNECTION_CLOSED,
+                NetworkErrorCode::ConnectionClosed,
+            ),
+            (
+                sys::Cronet_Error_ERROR_CODE_ERROR_CONNECTION_TIMED_OUT,
+                NetworkErrorCode::ConnectionTimedOut,
+            ),
+            (
+                sys::Cronet_Error_ERROR_CODE_ERROR_CONNECTION_REFUSED,
+                NetworkErrorCode::ConnectionRefused,
+            ),
+            (
+                sys::Cronet_Error_ERROR_CODE_ERROR_CONNECTION_RESET,
+                NetworkErrorCode::ConnectionReset,
+            ),
+            (
+                sys::Cronet_Error_ERROR_CODE_ERROR_ADDRESS_UNREACHABLE,
+                NetworkErrorCode::AddressUnreachable,
+            ),
+            (
+                sys::Cronet_Error_ERROR_CODE_ERROR_QUIC_PROTOCOL_FAILED,
+                NetworkErrorCode::QuicProtocolFailed,
+            ),
+            (
+                sys::Cronet_Error_ERROR_CODE_ERROR_OTHER,
+                NetworkErrorCode::Other,
+            ),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(NetworkErrorCode::from_raw(raw), expected);
+        }
+        assert_eq!(
+            NetworkErrorCode::from_raw(999),
+            NetworkErrorCode::Unknown(999)
+        );
+    }
 }

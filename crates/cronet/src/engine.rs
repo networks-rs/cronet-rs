@@ -226,6 +226,7 @@ impl EngineBuilder {
     /// Starts a new engine on the current Tokio runtime.
     pub fn build(self) -> Result<Engine> {
         validate_cache_size(self.cache)?;
+        validate_experimental_options(self.experimental_options.as_deref())?;
         if self.network_thread_priority.is_some() && !cfg!(target_os = "android") {
             return Err(Error::InvalidConfiguration(
                 "network thread priority is supported only on Android",
@@ -957,6 +958,18 @@ fn validate_cache_size(cache: CacheMode) -> Result<()> {
     }
 }
 
+fn validate_experimental_options(options: Option<&str>) -> Result<()> {
+    let Some(options) = options else {
+        return Ok(());
+    };
+    if serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(options).is_err() {
+        return Err(Error::InvalidConfiguration(
+            "experimental options must be a valid JSON object",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -977,6 +990,19 @@ mod tests {
                 Err(Error::InvalidConfiguration(_))
             ));
         }
+    }
+
+    #[test]
+    fn rejects_experimental_options_that_can_crash_native_startup() {
+        for options in ["", "{", "[]", "null", "true"] {
+            assert!(matches!(
+                validate_experimental_options(Some(options)),
+                Err(Error::InvalidConfiguration(_))
+            ));
+        }
+        assert!(validate_experimental_options(Some("{}")).is_ok());
+        assert!(validate_experimental_options(Some(r#"{"QUIC": {}}"#)).is_ok());
+        assert!(validate_experimental_options(None).is_ok());
     }
 
     #[cfg(not(target_os = "android"))]

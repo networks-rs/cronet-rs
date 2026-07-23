@@ -4,9 +4,7 @@
     "type": "entry",
     "mainElement": "EntryAbility",
     "deviceTypes": [
-      "default",
-      "phone",
-      "tablet"
+      "default"
     ],
     "deliveryWithInstall": true,
     "installationFree": false,

@@ -1341,28 +1341,40 @@ unsafe extern "C" fn on_redirect_received(
         RedirectPolicy::Handler(handler) => {
             let handler = handler.clone();
             let handler_redirect = redirect.clone();
-            let decision = context
+            let mut decision = context
                 .handle
                 .spawn(async move { handler(handler_redirect).await });
             let task_context = context.arc();
+            let mut finished = context.finished_sender.subscribe();
             context.handle.spawn(async move {
-                match decision.await {
-                    Ok(RedirectAction::Follow) => {
-                        if let Err(error) = task_context.control.follow_redirect() {
-                            task_context.fail_from_task(error);
+                tokio::select! {
+                    result = &mut decision => match result {
+                        Ok(RedirectAction::Follow) => {
+                            if let Err(error) = task_context.control.follow_redirect() {
+                                task_context.fail_from_task(error);
+                            }
                         }
-                    }
-                    Ok(RedirectAction::Cancel) => {
-                        task_context.fail_from_task(Error::Redirect {
-                            location: redirect.location,
-                            response: Box::new(redirect.response),
-                        });
-                    }
-                    Err(error) => task_context.fail_from_task(Error::TokioTask(format!(
-                        "redirect handler did not complete: {error}"
-                    ))),
+                        Ok(RedirectAction::Cancel) => {
+                            task_context.fail_from_task(Error::Redirect {
+                                location: redirect.location,
+                                response: Box::new(redirect.response),
+                            });
+                        }
+                        Err(error) => task_context.fail_from_task(Error::TokioTask(format!(
+                            "redirect handler did not complete: {error}"
+                        ))),
+                    },
+                    () = wait_for_request_finished(&mut finished) => decision.abort(),
                 }
             });
+        }
+    }
+}
+
+async fn wait_for_request_finished(finished: &mut watch::Receiver<Option<RequestFinishedInfo>>) {
+    while finished.borrow().is_none() {
+        if finished.changed().await.is_err() {
+            return;
         }
     }
 }

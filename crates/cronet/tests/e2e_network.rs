@@ -1,8 +1,9 @@
 #![cfg(feature = "network-tests")]
 
-use std::time::Duration;
+use std::{future::poll_fn, pin::Pin, time::Duration};
 
 use cronet::{BidirectionalRequest, Engine, Error, PublicKeyPins, QuicHint, Request};
+use futures_core::Stream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const HTTP3_HOST: &str = "cloudflare-quic.com";
@@ -35,6 +36,12 @@ async fn public_http2_bidirectional_stream_covers_headers_body_half_close_and_te
     assert_eq!(headers.status(), Some(200));
     assert_eq!(headers.negotiated_protocol, "h2");
     let mut body = Vec::new();
+    if let Some(chunk) = stream.next_chunk().await {
+        body.extend_from_slice(&chunk.unwrap());
+    }
+    if let Some(chunk) = poll_fn(|context| Pin::new(&mut stream).poll_next(context)).await {
+        body.extend_from_slice(&chunk.unwrap());
+    }
     stream.read_to_end(&mut body).await.unwrap();
     assert!(
         body.windows(b"tokio-full-duplex".len())
@@ -44,6 +51,54 @@ async fn public_http2_bidirectional_stream_covers_headers_body_half_close_and_te
     stream.finished().await.unwrap();
     assert!(stream.is_done());
     engine.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_http2_bidirectional_cancel_is_idempotent_and_terminal() {
+    let engine = Engine::builder().enable_http2(true).build().unwrap();
+    let request = BidirectionalRequest::builder("https://nghttp2.org/httpbin/stream/20")
+        .unwrap()
+        .method("GET")
+        .unwrap()
+        .end_of_stream(true)
+        .build()
+        .unwrap();
+    let mut stream =
+        tokio::time::timeout(Duration::from_secs(30), engine.open_bidirectional(request))
+            .await
+            .expect("HTTP/2 bidirectional open timed out")
+            .unwrap();
+    assert_eq!(stream.response_headers().await.unwrap().status(), Some(200));
+    stream.cancel();
+    stream.cancel();
+    assert!(matches!(stream.finished().await, Err(Error::Canceled)));
+    assert!(stream.is_done());
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_http2_active_stream_drop_cancels_and_shutdown_completes() {
+    let engine = Engine::builder().enable_http2(true).build().unwrap();
+    let request = BidirectionalRequest::builder("https://nghttp2.org/httpbin/stream/100")
+        .unwrap()
+        .method("GET")
+        .unwrap()
+        .read_channel_capacity(1)
+        .end_of_stream(true)
+        .build()
+        .unwrap();
+    let mut stream =
+        tokio::time::timeout(Duration::from_secs(30), engine.open_bidirectional(request))
+            .await
+            .expect("HTTP/2 bidirectional open timed out")
+            .unwrap();
+    assert_eq!(stream.response_headers().await.unwrap().status(), Some(200));
+    assert!(!stream.is_done());
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(30), engine.shutdown())
+        .await
+        .expect("shutdown waited forever after active bidirectional drop")
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

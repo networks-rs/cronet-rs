@@ -22,8 +22,8 @@ case "$TARGET" in
   *) fail "unsupported Android E2E target: $TARGET" ;;
 esac
 case "$LINKAGE" in
-  dynamic) RUNNER_FEATURE_ARGS=() ;;
-  static) RUNNER_FEATURE_ARGS=(--features static) ;;
+  dynamic) ;;
+  static) ;;
   *) fail "unsupported Android E2E linkage: $LINKAGE" ;;
 esac
 
@@ -81,13 +81,16 @@ CRONET_ANDROID_SUPPORT_DEX_JAR="$LIB_DIR/cronet-android-support.dex.jar"
 [[ -f "$CRONET_ANDROID_SUPPORT_DEX_JAR" ]] || fail \
   "Cronet Android support dex jar not found at $CRONET_ANDROID_SUPPORT_DEX_JAR; rebuild the native target"
 
+CARGO_ARGS=(build --manifest-path "$RUNNER_MANIFEST" --target "$TARGET" --release)
+if [[ "$LINKAGE" == static ]]; then
+  CARGO_ARGS+=(--features static)
+fi
 env \
   CRONET_SOURCE_DIR="$SOURCE_DIR" \
   CRONET_LIB_DIR="$LIB_DIR" \
   ANDROID_NDK_HOME="$ANDROID_NDK_HOME" \
   "$LINKER_ENV=$LINKER" \
-  cargo build --manifest-path "$RUNNER_MANIFEST" --target "$TARGET" --release \
-  "${RUNNER_FEATURE_ARGS[@]}"
+  cargo "${CARGO_ARGS[@]}"
 RUNNER_LIBRARY="$ROOT/tests/mobile-e2e/runner/target/$TARGET/release/libcronet_mobile_e2e_runner.so"
 [[ -f "$RUNNER_LIBRARY" ]] || fail "mobile E2E runner was not produced"
 
