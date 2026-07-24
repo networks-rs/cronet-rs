@@ -6,6 +6,8 @@ use std::{
     process::{Command, ExitStatus, Stdio},
 };
 
+mod platform;
+
 pub const CHROMIUM_REVISION: &str = "db64a84f93f16f8de53fee8d33df0a31473efefb";
 pub const CHROMIUM_VERSION: &str = "146.0.7633.0";
 const CHROMIUM_URL: &str = "https://chromium.googlesource.com/chromium/src.git";
@@ -558,7 +560,7 @@ fn source_tree_buildable(source: &Path) -> bool {
 /// target triple.
 #[must_use]
 pub fn native_target_supported(target: &str) -> bool {
-    gn_target_args(target).is_ok()
+    platform::resolve(Some(target)).is_ok()
 }
 
 fn sync(args: &[std::ffi::OsString]) -> Result<(), String> {
@@ -653,7 +655,7 @@ fn common_gn_args(release: bool) -> Vec<String> {
 }
 
 #[allow(clippy::too_many_lines)] // Native GN configuration and packaging form one atomic build transaction.
-fn build_native(options: BuildOptions, platform: PlatformConfig<'_>) -> Result<(), String> {
+fn build_native(options: BuildOptions, config: PlatformConfig<'_>) -> Result<(), String> {
     let source = options
         .common
         .source_dir
@@ -669,42 +671,12 @@ fn build_native(options: BuildOptions, platform: PlatformConfig<'_>) -> Result<(
     require_file(&gn, "run `cargo xtask sync` (without --api-only) first")?;
     require_file(&ninja, "run `cargo xtask sync` (without --api-only) first")?;
 
+    let platform_build = platform::resolve(options.target.as_deref())?;
     let out_dir = native_output_dir(&source, options.target.as_deref());
-    let overlay = write_cronet_overlay(&source, options.target.as_deref())?;
+    let overlay = write_cronet_overlay(&source, platform_build.as_ref())?;
     let overlay_out_dir = native_output_dir(&overlay, options.target.as_deref());
     let mut gn_args = common_gn_args(options.release);
-    if let Some(target) = options.target.as_deref() {
-        gn_args.extend(gn_target_args(target)?);
-        gn_args.extend(desktop_linux_host_toolchain_gn_args(
-            &source,
-            &overlay,
-            target,
-            platform.clang_dir,
-            platform.rust_sysroot,
-            platform.rust_bindgen,
-        )?);
-        if is_ohos_target(target) {
-            gn_args.extend(ohos_gn_args(
-                target,
-                platform.ohos_sdk_native,
-                platform.rust_sysroot,
-            )?);
-        } else if is_android_target(target) {
-            gn_args.extend(android_gn_args(
-                &source,
-                &overlay,
-                target,
-                platform.android_ndk,
-                platform.android_api_level,
-            )?);
-        } else if is_ios_target(target) {
-            gn_args.extend(ios_gn_args(
-                target,
-                platform.ios_developer_dir,
-                platform.ios_deployment_target,
-            )?);
-        }
-    }
+    gn_args.extend(platform_build.gn_args(&source, &overlay, config)?);
     gn_args.extend(options.gn_args);
 
     run_command(
@@ -726,16 +698,7 @@ fn build_native(options: BuildOptions, platform: PlatformConfig<'_>) -> Result<(
         .env_remove("TARGET")
         .arg("-C")
         .arg(&overlay_out_dir);
-    if options.target.as_deref().is_some_and(|target| {
-        is_ohos_target(target)
-            || (is_desktop_linux_target(target)
-                && (platform.rust_sysroot.is_some()
-                    || requires_native_linux_arm64_tools(
-                        env::consts::OS,
-                        env::consts::ARCH,
-                        target,
-                    )))
-    }) {
+    if platform_build.needs_rustc_bootstrap(config) {
         // Chromium's external-Rust path still emits a small set of -Z build
         // flags even when rustc_nightly_capability is false. Scope the stable
         // compiler opt-in to this native build subprocess; never mutate the
@@ -750,15 +713,7 @@ fn build_native(options: BuildOptions, platform: PlatformConfig<'_>) -> Result<(
         // inputs without making them build dependencies. We package them into
         // Cronet's complete archive, so request fresh target-ABI copies rather
         // than accidentally reusing artifacts from an older GN configuration.
-        let extension = if options
-            .target
-            .as_deref()
-            .is_some_and(|target| target.contains("windows"))
-        {
-            "lib"
-        } else {
-            "a"
-        };
+        let extension = platform_build.static_archive_extension();
         ninja_command.arg(format!(
             "obj/buildtools/third_party/libc++/libc++.{extension}"
         ));
@@ -766,23 +721,9 @@ fn build_native(options: BuildOptions, platform: PlatformConfig<'_>) -> Result<(
             "obj/buildtools/third_party/libc++abi/libc++abi.{extension}"
         ));
     }
-    if options.target.as_deref().is_some_and(is_android_target) {
-        // The output directory is shared with the pinned checkout through an
-        // overlay symlink. Chromium's Java helpers otherwise canonicalize it
-        // back to the checkout and select its host CIPD JDK. Keep all action
-        // paths rooted in the generated overlay where host-tool substitutions
-        // are isolated.
-        ninja_command.env("CHECKOUT_SOURCE_ROOT", &overlay);
-        // Android's system proxy, certificate verification and network-change
-        // implementations are Java-backed even when Cronet is consumed only
-        // through its native C API. Ship their minimal transitive runtime next
-        // to the native library so Android applications can dex it.
-        ninja_command.arg(":cronet_rs_android_support_java");
-    }
+    platform_build.configure_ninja(&mut ninja_command, &overlay, options.linkage.linkages())?;
     run_command(&mut ninja_command, "compile Cronet from source")?;
-    if options.target.as_deref().is_some_and(is_android_target) {
-        install_android_support_dex(&overlay_out_dir, &out_dir)?;
-    }
+    platform_build.post_build(&overlay_out_dir, &out_dir)?;
     if options.linkage.linkages().contains(&NativeLinkage::Static) {
         bundle_static_archive(&source, &overlay_out_dir, &out_dir)?;
         write_static_link_manifest(
@@ -1147,34 +1088,8 @@ fn is_native_library_output(name: &str, linkage: NativeLinkage) -> bool {
     }
 }
 
-fn gn_target_args(target: &str) -> Result<Vec<String>, String> {
-    let (target_os, target_cpu) = match target {
-        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-ohos" => ("linux", "x64"),
-        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-ohos" => ("linux", "arm64"),
-        "i686-linux-android" => ("android", "x86"),
-        "x86_64-linux-android" => ("android", "x64"),
-        "armv7-linux-androideabi" => ("android", "arm"),
-        "aarch64-linux-android" => ("android", "arm64"),
-        "x86_64-apple-darwin" => ("mac", "x64"),
-        "aarch64-apple-darwin" => ("mac", "arm64"),
-        "x86_64-apple-ios" => ("ios", "x64"),
-        "aarch64-apple-ios" | "aarch64-apple-ios-sim" => ("ios", "arm64"),
-        "x86_64-pc-windows-msvc" => ("win", "x64"),
-        "aarch64-pc-windows-msvc" => ("win", "arm64"),
-        "armv7-unknown-linux-ohos" => ("linux", "arm"),
-        other => return Err(format!("unsupported Cronet native target `{other}`")),
-    };
-    Ok(vec![
-        format!("target_os=\"{target_os}\""),
-        format!("target_cpu=\"{target_cpu}\""),
-    ])
-}
-
 fn is_desktop_linux_target(target: &str) -> bool {
-    matches!(
-        target,
-        "x86_64-unknown-linux-gnu" | "aarch64-unknown-linux-gnu"
-    )
+    platform::kind(target) == Some(platform::PlatformKind::Linux)
 }
 
 fn requires_native_linux_arm64_tools(host_os: &str, host_arch: &str, target: &str) -> bool {
@@ -1396,20 +1311,11 @@ fn executable_on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn is_android_target(target: &str) -> bool {
-    matches!(
-        target,
-        "i686-linux-android"
-            | "x86_64-linux-android"
-            | "armv7-linux-androideabi"
-            | "aarch64-linux-android"
-    )
+    platform::kind(target) == Some(platform::PlatformKind::Android)
 }
 
 fn is_ios_target(target: &str) -> bool {
-    matches!(
-        target,
-        "x86_64-apple-ios" | "aarch64-apple-ios" | "aarch64-apple-ios-sim"
-    )
+    platform::kind(target) == Some(platform::PlatformKind::Ios)
 }
 
 fn android_gn_args(
@@ -1738,10 +1644,6 @@ fn ohos_target(target: &str) -> Option<OhosTarget> {
         }),
         _ => None,
     }
-}
-
-fn is_ohos_target(target: &str) -> bool {
-    ohos_target(target).is_some()
 }
 
 fn ohos_gn_args(
@@ -2496,8 +2398,10 @@ fn patch_android_clang_dependency(manifest: &Path, target: Option<&str>) -> Resu
     )
 }
 
-#[allow(clippy::too_many_lines)] // Platform patch stages must share one generated overlay lifecycle.
-fn write_cronet_overlay(source: &Path, target: Option<&str>) -> Result<PathBuf, String> {
+fn write_cronet_overlay(
+    source: &Path,
+    platform: &dyn platform::PlatformBuild,
+) -> Result<PathBuf, String> {
     const ANGLE_IMPORT: &str = "import(\"//third_party/angle/dotfile_settings.gni\")\n";
     const ANGLE_ALLOWLIST: &str = "    angle_dotfile_settings.exec_script_allowlist +\n";
 
@@ -2509,9 +2413,9 @@ fn write_cronet_overlay(source: &Path, target: Option<&str>) -> Result<PathBuf, 
         .expect("Chromium src directory must have a parent")
         .join("cronet-gn-root");
     let platform_marker = overlay.join(".cronet-rs-platform");
-    let platform = target.unwrap_or("host");
+    let platform_key = platform.cache_key();
     if overlay.exists()
-        && fs::read_to_string(&platform_marker).is_ok_and(|current| current.trim() != platform)
+        && fs::read_to_string(&platform_marker).is_ok_and(|current| current.trim() != platform_key)
     {
         // Platform overlays have intentionally different source selections.
         // Persistent target-specific Ninja output is outside this generated
@@ -2521,7 +2425,7 @@ fn write_cronet_overlay(source: &Path, target: Option<&str>) -> Result<PathBuf, 
     fs::create_dir_all(&overlay).map_err(display_error("create Cronet GN overlay"))?;
     write_if_changed(
         &platform_marker,
-        format!("{platform}\n").as_bytes(),
+        format!("{platform_key}\n").as_bytes(),
         "write the Cronet overlay platform marker",
     )?;
 
@@ -2558,7 +2462,6 @@ fn write_cronet_overlay(source: &Path, target: Option<&str>) -> Result<PathBuf, 
     write_build_overlay(&source, &overlay, filter_tests)?;
     patch_bindgen_rustfmt_overlay(&source, &overlay)?;
     write_buildtools_overlay(&source, &overlay)?;
-    write_platform_overlay(&source, &overlay)?;
     for directory in ["base", "crypto", "net", "url"] {
         write_test_filtered_directory(
             &source.join(directory),
@@ -2566,20 +2469,11 @@ fn write_cronet_overlay(source: &Path, target: Option<&str>) -> Result<PathBuf, 
             filter_tests,
         )?;
     }
-    patch_ios_base_features(&source, &overlay, target)?;
-    patch_ohos_partition_alloc(&source, &overlay)?;
-    patch_ohos_base_process(&source, &overlay)?;
-    patch_ohos_fd_close_interposer(&source, &overlay)?;
-    patch_ohos_resolver(&source, &overlay)?;
-    patch_ohos_link_closure(&source, &overlay)?;
-    patch_android_ndk_compat(&source, &overlay, target)?;
-    patch_android_proxy_listener(&source, &overlay, target)?;
     write_cronet_component_overlay(&source, &overlay, filter_tests)?;
     write_testing_overlay(&source, &overlay)?;
-    let filter_third_party_tests = !target.is_some_and(is_android_target);
-    write_third_party_overlay(&source, &overlay, filter_third_party_tests)?;
-    patch_android_host_tools(&source, &overlay, target)?;
+    write_third_party_overlay(&source, &overlay, platform.filter_third_party_tests())?;
     write_cxx_libcxx_compat_overlay(&source, &overlay)?;
+    platform.prepare_overlay(&source, &overlay)?;
 
     let upstream = fs::read_to_string(source.join(".gn"))
         .map_err(display_error("read Chromium GN dotfile"))?;
@@ -2598,35 +2492,7 @@ fn write_cronet_overlay(source: &Path, target: Option<&str>) -> Result<PathBuf, 
          \x20 deps = [ \"//components/cronet:cronet\" ]\n\
          }\n",
     );
-    if target.is_some_and(is_android_target) {
-        root_build.push_str(
-            r#"
-
-import("//build/config/android/rules.gni")
-
-# base_java is compiled against a placeholder BuildConfig but intentionally
-# does not package it. Native-only consumers do not have an APK target to
-# generate the usual replacement, so compile the pinned placeholder here.
-android_library("cronet_rs_android_build_config_java") {
-  srcjar_deps = [ "//build/android:placeholder_build_config_srcjar" ]
-}
-
-# Chromium's Android net implementation calls these Java classes from native
-# code. Keep the jar deliberately narrower than the public Cronet Java API: a
-# Rust application uses Cronet through cronet-sys and only needs the platform
-# bridge and its runtime dependencies.
-dist_jar("cronet_rs_android_support_java") {
-  output = "$root_out_dir/cronet-android-support.jar"
-  deps = [
-    ":cronet_rs_android_build_config_java",
-    "//net/android:net_java",
-  ]
-  jar_excluded_patterns = [ "META-INF/versions/*/module-info.class" ]
-  requires_android = true
-}
-"#,
-        );
-    }
+    platform.append_root_build(&mut root_build);
     write_if_changed(
         &overlay.join("BUILD.gn"),
         root_build.as_bytes(),
@@ -3135,16 +3001,6 @@ fn write_test_filtered_directory(
             || (source.file_name().is_some_and(|name| name == "base")
                 && source.join("test").is_dir()
                 && entry.file_name() == "test")
-            || (source.ends_with("base/allocator/partition_allocator")
-                && entry.file_name() == "partition_alloc.gni")
-            || (source.ends_with("base/allocator/partition_allocator/src/partition_alloc")
-                && entry.file_name() == "aarch64_support.h")
-            || (source.ends_with("base/process") && entry.file_name() == "set_process_title.cc")
-            || (source.ends_with("net/dns/public") && entry.file_name() == "scoped_res_state.cc")
-            || (source.ends_with("base/debug") && entry.file_name() == "stack_trace_posix.cc")
-            || (source.ends_with("base/android/linker") && entry.file_name() == "ashmem.cc")
-            || (source.ends_with("net/cert/internal")
-                && entry.file_name() == "system_trust_store.cc")
         {
             continue;
         }
@@ -3270,6 +3126,7 @@ fn write_build_overlay(source: &Path, overlay: &Path, filter_tests: bool) -> Res
     let build = remove_named_gn_blocks(build, "group", "gold_common_pytype")?;
     fs::write(overlay_build.join("BUILD.gn"), build)
         .map_err(display_error("write Cronet-only build/BUILD.gn"))?;
+    ensure_symlink(&source_build.join("config"), &overlay_build.join("config"))?;
     write_test_filtered_directory(
         &source_build.join("android"),
         &overlay_build.join("android"),
@@ -3333,9 +3190,6 @@ fn patch_bindgen_rustfmt_invocation(script: &str) -> Result<String, String> {
 }
 
 fn write_buildtools_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
-    const MUSL_MARKER: &str = "#define _LIBCPP_HAS_MUSL_LIBC 0";
-    const MUSL_PATCH: &str = "#if defined(__OHOS__)\n#define _LIBCPP_HAS_MUSL_LIBC 1\n#else\n#define _LIBCPP_HAS_MUSL_LIBC 0\n#endif";
-
     let source_buildtools = source.join("buildtools");
     let overlay_buildtools = overlay.join("buildtools");
     replace_generated_link_with_directory(&overlay_buildtools)?;
@@ -3367,18 +3221,26 @@ fn write_buildtools_overlay(source: &Path, overlay: &Path) -> Result<(), String>
         fs::read_dir(&source_libcxx).map_err(display_error("list Chromium libc++ build files"))?
     {
         let entry = entry.map_err(display_error("read a Chromium libc++ build entry"))?;
-        if entry.file_name() != "__config_site" {
-            ensure_symlink(&entry.path(), &overlay_libcxx.join(entry.file_name()))?;
-        }
+        ensure_symlink(&entry.path(), &overlay_libcxx.join(entry.file_name()))?;
     }
-    let config = fs::read_to_string(source_libcxx.join("__config_site"))
+    Ok(())
+}
+
+fn patch_ohos_libcxx_config(source: &Path, overlay: &Path) -> Result<(), String> {
+    const MUSL_MARKER: &str = "#define _LIBCPP_HAS_MUSL_LIBC 0";
+    const MUSL_PATCH: &str = "#if defined(__OHOS__)\n#define _LIBCPP_HAS_MUSL_LIBC 1\n#else\n#define _LIBCPP_HAS_MUSL_LIBC 0\n#endif";
+
+    let source_config = source.join("buildtools/third_party/libc++/__config_site");
+    let overlay_config = overlay.join("buildtools/third_party/libc++/__config_site");
+    let config = fs::read_to_string(source_config)
         .map_err(display_error("read Chromium libc++ configuration"))?;
     if !config.contains(MUSL_MARKER) {
         return Err("Chromium libc++ configuration changed around its musl setting".to_owned());
     }
     let config = config.replacen(MUSL_MARKER, MUSL_PATCH, 1);
+    replace_generated_link_with_file(&overlay_config)?;
     write_if_changed(
-        &overlay_libcxx.join("__config_site"),
+        &overlay_config,
         config.as_bytes(),
         "write the OHOS libc++ configuration",
     )
@@ -3763,13 +3625,6 @@ fn patch_exact_source_file(
     )
 }
 
-fn write_platform_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
-    write_ohos_toolchain(overlay)?;
-    patch_ohos_rust_target(source, overlay)?;
-    patch_ohos_compiler_config(source, overlay)?;
-    patch_android_gclient_args(source, overlay)
-}
-
 fn patch_android_gclient_args(source: &Path, overlay: &Path) -> Result<(), String> {
     let relative = "build/config/gclient_args.gni";
     let contents = fs::read_to_string(source.join(relative))
@@ -3791,6 +3646,65 @@ fn patch_android_gclient_args(source: &Path, overlay: &Path) -> Result<(), Strin
         &overlay_path,
         contents.as_bytes(),
         "write the external Android NDK checkout marker",
+    )
+}
+
+fn patch_android_host_os(source: &Path, overlay: &Path) -> Result<(), String> {
+    const MARKER: &str =
+        "  assert(host_os == \"linux\", \"Android builds are only supported on Linux.\")";
+    const PATCH: &str = "  # The external NDK also ships native macOS host tools. Chromium labels\n  # this configuration best-effort; cronet-src verifies its reduced C API graph.\n  assert(host_os == \"linux\" || host_os == \"mac\",\n         \"Android builds require a Linux or macOS host.\")";
+
+    let source_config = source.join("build/config");
+    let overlay_config = overlay.join("build/config");
+    replace_generated_link_with_directory(&overlay_config)?;
+    for entry in
+        fs::read_dir(&source_config).map_err(display_error("list Chromium build config"))?
+    {
+        let entry = entry.map_err(display_error("read Chromium build config entry"))?;
+        if entry.file_name() == "BUILDCONFIG.gn" {
+            continue;
+        }
+        ensure_symlink(&entry.path(), &overlay_config.join(entry.file_name()))?;
+    }
+
+    let contents = fs::read_to_string(source_config.join("BUILDCONFIG.gn"))
+        .map_err(display_error("read Chromium BUILDCONFIG.gn"))?;
+    if !contents.contains(MARKER) {
+        return Err("Chromium BUILDCONFIG.gn changed around its Android host check".to_owned());
+    }
+    write_if_changed(
+        &overlay_config.join("BUILDCONFIG.gn"),
+        contents.replacen(MARKER, PATCH, 1).as_bytes(),
+        "write the Android host-platform compatibility patch",
+    )
+}
+
+fn patch_android_relative_vtables(source: &Path, overlay: &Path) -> Result<(), String> {
+    const MARKER: &str = "if (use_relative_vtables_abi) {\n    cflags_cc += [ \"-fexperimental-relative-c++-abi-vtables\" ]\n    ldflags += [ \"-fexperimental-relative-c++-abi-vtables\" ]\n  }";
+    const PATCH: &str = "if (use_relative_vtables_abi) {\n    cflags_cc += [ \"-fexperimental-relative-c++-abi-vtables\" ]\n    ldflags += [ \"-fexperimental-relative-c++-abi-vtables\" ]\n  } else if (is_android && current_cpu == \"arm64\") {\n    # New Chromium Clang defaults to relative vtables for this ABI. Cronet's\n    # static archive must remain linkable by the older lld bundled with the\n    # caller-selected Android NDK.\n    cflags_cc += [ \"-fno-experimental-relative-c++-abi-vtables\" ]\n  }";
+
+    let source_compiler = source.join("build/config/compiler");
+    let overlay_compiler = overlay.join("build/config/compiler");
+    replace_generated_link_with_directory(&overlay_compiler)?;
+    for entry in
+        fs::read_dir(&source_compiler).map_err(display_error("list Chromium compiler config"))?
+    {
+        let entry = entry.map_err(display_error("read Chromium compiler config entry"))?;
+        if entry.file_name() == "BUILD.gn" {
+            continue;
+        }
+        ensure_symlink(&entry.path(), &overlay_compiler.join(entry.file_name()))?;
+    }
+
+    let contents = fs::read_to_string(source_compiler.join("BUILD.gn"))
+        .map_err(display_error("read Chromium compiler BUILD.gn"))?;
+    if !contents.contains(MARKER) {
+        return Err("Chromium compiler config changed around its relative-vtable ABI".to_owned());
+    }
+    write_if_changed(
+        &overlay_compiler.join("BUILD.gn"),
+        contents.replacen(MARKER, PATCH, 1).as_bytes(),
+        "write the Android relative-vtable compatibility patch",
     )
 }
 
@@ -3865,9 +3779,6 @@ fn patch_ohos_rust_target(source: &Path, overlay: &Path) -> Result<(), String> {
     const BUILDCONFIG_MARKER: &str =
         "declare_args() {\n  # Set to enable the official build level of optimization.";
     const BUILDCONFIG_PATCH: &str = "declare_args() {\n  # cronet-rs models OHOS as Linux for Chromium's existing POSIX graph.\n  # Keep the actual target identity globally visible to compatibility logic.\n  cronet_target_ohos = false\n  cronet_ohos_llvm_triple = \"\"\n  cronet_ohos_rust_triple = \"\"\n\n  # Set to enable the official build level of optimization.";
-    const ANDROID_HOST_MARKER: &str =
-        "  assert(host_os == \"linux\", \"Android builds are only supported on Linux.\")";
-    const ANDROID_HOST_PATCH: &str = "  # The external NDK also ships native macOS host tools. Chromium labels\n  # this configuration best-effort; cronet-src verifies its reduced C API graph.\n  assert(host_os == \"linux\" || host_os == \"mac\",\n         \"Android builds require a Linux or macOS host.\")";
     const RUST_TARGET_MARKER: &str = "rust_abi_target = \"\"\nif (is_linux || is_chromeos) {";
     const RUST_TARGET_PATCH: &str = "rust_abi_target = \"\"\nif (cronet_target_ohos && is_a_target_toolchain) {\n  assert(cronet_ohos_rust_triple != \"\", \"cronet-src requires an OHOS Rust target\")\n  rust_abi_target = cronet_ohos_rust_triple\n} else if (is_linux || is_chromeos) {";
     const KNOWN_TARGET_MARKER: &str = "  assert(_is_rust_abi_target_a_known_triple,\n         \"`${rust_abi_target}` needs to be added to \" +";
@@ -3882,7 +3793,7 @@ fn patch_ohos_rust_target(source: &Path, overlay: &Path) -> Result<(), String> {
         let entry = entry.map_err(display_error("read Chromium build config entry"))?;
         if matches!(
             entry.file_name().to_str(),
-            Some("BUILDCONFIG.gn" | "gclient_args.gni" | "rust.gni" | "compiler")
+            Some("BUILDCONFIG.gn" | "rust.gni" | "compiler")
         ) {
             continue;
         }
@@ -3892,12 +3803,10 @@ fn patch_ohos_rust_target(source: &Path, overlay: &Path) -> Result<(), String> {
     let build_config_path = source_config.join("BUILDCONFIG.gn");
     let build_config = fs::read_to_string(&build_config_path)
         .map_err(display_error("read Chromium BUILDCONFIG.gn"))?;
-    if !build_config.contains(BUILDCONFIG_MARKER) || !build_config.contains(ANDROID_HOST_MARKER) {
+    if !build_config.contains(BUILDCONFIG_MARKER) {
         return Err("Chromium BUILDCONFIG.gn changed around its global arguments".to_owned());
     }
-    let build_config = build_config
-        .replacen(BUILDCONFIG_MARKER, BUILDCONFIG_PATCH, 1)
-        .replacen(ANDROID_HOST_MARKER, ANDROID_HOST_PATCH, 1);
+    let build_config = build_config.replacen(BUILDCONFIG_MARKER, BUILDCONFIG_PATCH, 1);
     let overlay_build_config = overlay_config.join("BUILDCONFIG.gn");
     replace_generated_link_with_file(&overlay_build_config)?;
     write_if_changed(
@@ -3935,8 +3844,6 @@ fn patch_ohos_compiler_config(source: &Path, overlay: &Path) -> Result<(), Strin
     const POSIX_CXX23_MARKER: &str =
         "if (use_cxx23) {\n      cflags_cc += [ \"-std=${standard_prefix}++23\" ]";
     const POSIX_CXX23_PATCH: &str = "if (use_cxx23) {\n      if (cronet_target_ohos) {\n        cflags_cc += [ \"-std=${standard_prefix}++2b\" ]\n      } else {\n        cflags_cc += [ \"-std=${standard_prefix}++23\" ]\n      }";
-    const RELATIVE_VTABLE_MARKER: &str = "if (use_relative_vtables_abi) {\n    cflags_cc += [ \"-fexperimental-relative-c++-abi-vtables\" ]\n    ldflags += [ \"-fexperimental-relative-c++-abi-vtables\" ]\n  }";
-    const RELATIVE_VTABLE_PATCH: &str = "if (use_relative_vtables_abi) {\n    cflags_cc += [ \"-fexperimental-relative-c++-abi-vtables\" ]\n    ldflags += [ \"-fexperimental-relative-c++-abi-vtables\" ]\n  } else if (is_android && current_cpu == \"arm64\") {\n    # New Chromium Clang defaults to relative vtables for this ABI. Cronet's\n    # static archive must remain linkable by the older lld bundled with the\n    # caller-selected Android NDK.\n    cflags_cc += [ \"-fno-experimental-relative-c++-abi-vtables\" ]\n  }";
     const SPLIT_THRESHOLD_MARKER: &str = "if (default_toolchain != \"//build/toolchain/cros:target\") {\n      cflags += [\n        \"-mllvm\",\n        \"-split-threshold-for-reg-with-hint=0\",";
     const SPLIT_THRESHOLD_PATCH: &str = "if (default_toolchain != \"//build/toolchain/cros:target\" &&\n        !cronet_target_ohos) {\n      cflags += [\n        \"-mllvm\",\n        \"-split-threshold-for-reg-with-hint=0\",";
     const GNU_TARGET_MARKERS: [(&str, &str); 3] = [
@@ -3974,7 +3881,6 @@ fn patch_ohos_compiler_config(source: &Path, overlay: &Path) -> Result<(), Strin
         || !compiler.contains(CREL_MARKER)
         || !compiler.contains(CXX23_MARKER)
         || !compiler.contains(POSIX_CXX23_MARKER)
-        || !compiler.contains(RELATIVE_VTABLE_MARKER)
         || !compiler.contains(SPLIT_THRESHOLD_MARKER)
     {
         return Err(
@@ -3987,7 +3893,6 @@ fn patch_ohos_compiler_config(source: &Path, overlay: &Path) -> Result<(), Strin
         .replacen(CREL_MARKER, CREL_PATCH, 1)
         .replacen(CXX23_MARKER, CXX23_PATCH, 1)
         .replacen(POSIX_CXX23_MARKER, POSIX_CXX23_PATCH, 1)
-        .replacen(RELATIVE_VTABLE_MARKER, RELATIVE_VTABLE_PATCH, 1)
         .replacen(SPLIT_THRESHOLD_MARKER, SPLIT_THRESHOLD_PATCH, 1);
     for (marker, patch) in GNU_TARGET_MARKERS {
         if !compiler.contains(marker) {
@@ -4936,30 +4841,57 @@ after"#;
 
     #[test]
     fn maps_every_published_rust_target_to_gn() {
+        use platform::PlatformKind::{Android, Ios, Linux, MacOs, Ohos, Windows};
+
         let targets = [
-            "x86_64-unknown-linux-gnu",
-            "aarch64-unknown-linux-gnu",
-            "i686-linux-android",
-            "x86_64-linux-android",
-            "armv7-linux-androideabi",
-            "aarch64-linux-android",
-            "x86_64-apple-darwin",
-            "aarch64-apple-darwin",
-            "x86_64-apple-ios",
-            "aarch64-apple-ios",
-            "aarch64-apple-ios-sim",
-            "x86_64-pc-windows-msvc",
-            "aarch64-pc-windows-msvc",
-            "armv7-unknown-linux-ohos",
-            "aarch64-unknown-linux-ohos",
-            "x86_64-unknown-linux-ohos",
+            ("x86_64-unknown-linux-gnu", Linux, "linux", "x64"),
+            ("aarch64-unknown-linux-gnu", Linux, "linux", "arm64"),
+            ("i686-linux-android", Android, "android", "x86"),
+            ("x86_64-linux-android", Android, "android", "x64"),
+            ("armv7-linux-androideabi", Android, "android", "arm"),
+            ("aarch64-linux-android", Android, "android", "arm64"),
+            ("x86_64-apple-darwin", MacOs, "mac", "x64"),
+            ("aarch64-apple-darwin", MacOs, "mac", "arm64"),
+            ("x86_64-apple-ios", Ios, "ios", "x64"),
+            ("aarch64-apple-ios", Ios, "ios", "arm64"),
+            ("aarch64-apple-ios-sim", Ios, "ios", "arm64"),
+            ("x86_64-pc-windows-msvc", Windows, "win", "x64"),
+            ("aarch64-pc-windows-msvc", Windows, "win", "arm64"),
+            ("armv7-unknown-linux-ohos", Ohos, "linux", "arm"),
+            ("aarch64-unknown-linux-ohos", Ohos, "linux", "arm64"),
+            ("x86_64-unknown-linux-ohos", Ohos, "linux", "x64"),
         ];
-        for target in targets {
-            let arguments = gn_target_args(target).unwrap();
-            assert!(arguments[0].starts_with("target_os="));
-            assert!(arguments[1].starts_with("target_cpu="));
+        for (target, kind, gn_os, gn_cpu) in targets {
+            let target_build = platform::resolve(Some(target)).unwrap();
+            let specification = target_build.target_spec().unwrap();
+            assert_eq!(target_build.kind(), kind);
+            assert_eq!(specification.triple, target);
+            assert_eq!(specification.gn_os, gn_os);
+            assert_eq!(specification.gn_cpu, gn_cpu);
         }
-        assert!(gn_target_args("wasm32-unknown-unknown").is_err());
+        let host = platform::resolve(None).unwrap();
+        assert_eq!(host.kind(), platform::PlatformKind::Host);
+        assert!(host.target_spec().is_none());
+        assert!(platform::resolve(Some("wasm32-unknown-unknown")).is_err());
+    }
+
+    #[test]
+    fn keeps_platform_only_build_hooks_isolated() {
+        let android = platform::resolve(Some("aarch64-linux-android")).unwrap();
+        let windows = platform::resolve(Some("aarch64-pc-windows-msvc")).unwrap();
+        let macos = platform::resolve(Some("aarch64-apple-darwin")).unwrap();
+
+        assert!(!android.filter_third_party_tests());
+        assert!(macos.filter_third_party_tests());
+        assert_eq!(windows.static_archive_extension(), "lib");
+        assert_eq!(macos.static_archive_extension(), "a");
+
+        let mut android_root = String::new();
+        android.append_root_build(&mut android_root);
+        assert!(android_root.contains("cronet_rs_android_support_java"));
+        let mut macos_root = String::new();
+        macos.append_root_build(&mut macos_root);
+        assert!(macos_root.is_empty());
     }
 
     #[test]
