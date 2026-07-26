@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-#[path = "../../../../crates/cronet/tests/support/portable_e2e.rs"]
+#[path = "../../../../crates/tokio-cronet/tests/support/portable_e2e.rs"]
 mod portable_e2e;
 
 const RESULT_DIRECTORY: &str = "/data/storage/el2/base/files";

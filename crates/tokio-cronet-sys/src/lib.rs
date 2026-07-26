@@ -2,9 +2,9 @@
 //!
 //! The declarations are generated from upstream `cronet_c.h` and
 //! `bidirectional_stream_c.h` at build time.
-//! `cronet-src` supplies the pinned headers and always builds the native
+//! `tokio-cronet-src` supplies the pinned headers and always builds the native
 //! library from the same filtered source tree unless an explicit
-//! `CRONET_LIB_DIR` override is supplied. Prefer the safe `cronet` crate.
+//! `CRONET_LIB_DIR` override is supplied. Prefer the safe `tokio-cronet` crate.
 
 #![allow(
     non_camel_case_types,

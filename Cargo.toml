@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/cronet", "crates/cronet-sys", "xtask"]
-default-members = ["crates/cronet", "crates/cronet-sys"]
+members = ["crates/tokio-cronet", "crates/tokio-cronet-sys", "xtask"]
+default-members = ["crates/tokio-cronet", "crates/tokio-cronet-sys"]
 resolver = "2"
 
 [workspace.package]

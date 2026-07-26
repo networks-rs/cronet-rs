@@ -1,2 +1,2 @@
 [alias]
-xtask = "run -p cronet-src --bin xtask --"
+xtask = "run -p tokio-cronet-src --bin xtask --"

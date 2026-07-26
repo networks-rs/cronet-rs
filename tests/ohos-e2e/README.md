@@ -59,7 +59,7 @@ all injected. No host-specific path, device identifier, certificate, QEMU
 image, or prebuilt Cronet library is stored in the repository.
 
 Both linkage modes compile the exact shared
-`crates/cronet/tests/support/portable_e2e.rs` suite into the HAP. It exercises
+`crates/tokio-cronet/tests/support/portable_e2e.rs` suite into the HAP. It exercises
 the complete audited safe API over real local HTTP traffic, including all
 request-builder options, buffered/streaming/rewindable uploads, redirects,
 `AsyncRead` and `Stream` response consumption, metrics and listener events,

@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString, c_char};
 
-use cronet_sys as sys;
+use tokio_cronet_sys as sys;
 
 use crate::{Error, NetworkError, NetworkErrorCode, Result};
 

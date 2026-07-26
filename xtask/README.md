@@ -1,7 +1,7 @@
-# cronet-src
+# tokio-cronet-src
 
-Pinned source acquisition and native build support for `cronet-sys`, modeled
-after `openssl-src`.
+Pinned source acquisition and native build support for `tokio-cronet-sys`,
+modeled after `openssl-src`.
 
 `Build` selects the requested target and dynamic/static linkage, locates a
 complete source tree, and compiles Cronet. Source selection is:

@@ -11,11 +11,11 @@ functions to safe callers.
 
 | Capability | Implementation | Verification |
 | --- | --- | --- |
-| Source-generated sys bindings | `cronet-sys` runs bindgen against `cronet-src`'s pinned `cronet_c.h` and `bidirectional_stream_c.h` | Workspace checks and every source build |
+| Source-generated sys bindings | `tokio-cronet-sys` runs bindgen against `tokio-cronet-src`'s pinned `cronet_c.h` and `bidirectional_stream_c.h` | Workspace checks and every source build |
 | Shared linking | Default mode builds and links the versioned shared Cronet target from source | Source-linked native E2E on every target |
 | Static linking | Additive `static` feature builds and links the complete archive from source | Source-linked static native E2E on every target |
 | Portable static archive | The build folds the GN thin archive, Chromium Rust rlibs, CXX bridge, libc++, and libc++abi into one regular archive; the final Cargo artifact supplies Rust allocator lang items, while GN-derived system libraries/frameworks remain explicit | Static source link and E2E; archive-symbol regression tests |
-| Source delivery | `cronet-src::Build` prefers an explicit or vendored tree and otherwise materializes the pinned, filtered source cache; it never downloads a native library | Source-selection unit tests and six-target CI |
+| Source delivery | `tokio-cronet-src::Build` prefers an explicit or vendored tree and otherwise materializes the pinned, filtered source cache; it never downloads a native library | Source-selection unit tests and six-target CI |
 | OpenHarmony source build | The same builder discovers a caller-selected Native SDK and supports ARMv7, ARM64, and x86-64 without assuming a DevEco installation path | Shared/static build matrix for all three targets; application-level ARM64 QEMU E2E |
 
 ## DNS and TLS boundary
@@ -96,12 +96,12 @@ functions to safe callers.
 `Buffer`, `BufferCallback`, `Runnable`, `Executor`, `UploadDataSink`, callback
 objects, status listeners, request-finished listeners, generated structs, and
 their `Create`/`Destroy`/getter/setter functions are deliberately internal.
-They are fully generated in `cronet-sys` from the pinned headers, while the
+They are fully generated in `tokio-cronet-sys` from the pinned headers, while the
 safe crate owns their lifetimes and copies all callback-borrowed data before
 returning to Cronet. There is no public raw pointer or public `unsafe` function.
 
 The native `Cronet_UrlRequest_IsDone` and `bidirectional_stream_is_done`
-symbols are generated in `cronet-sys`, but the safe `is_done` methods use
+symbols are generated in `tokio-cronet-sys`, but the safe `is_done` methods use
 terminal state set by the corresponding native success/failure/cancel
 callbacks. Polling a native object after its RAII cleanup could otherwise race
 destruction; the safe methods expose the same state without extending a raw
@@ -115,7 +115,7 @@ The sole excluded symbol is
 `Cronet_Engine_SetMockCertVerifierForTesting(void *net::CertVerifier)`. It is a
 testing-only C++ ownership transfer disguised as `void*`; no safe Rust value can
 satisfy that contract. Exposing it as safe would invalidate the binding's
-safety claim. It remains available in generated `cronet-sys` for explicitly
+safety claim. It remains available in generated `tokio-cronet-sys` for explicitly
 unsafe native-test code.
 
 ## E2E policy
@@ -124,7 +124,7 @@ unsafe native-test code.
   and compares it with `tests/e2e-coverage.tsv`. A new public function without
   a concrete test symbol, a removed function with a stale mapping, or a mapping
   to a missing test source fails CI. The current manifest covers 105 functions.
-- `crates/cronet/tests/support/portable_e2e.rs` is the single runtime-portable
+- `crates/tokio-cronet/tests/support/portable_e2e.rs` is the single runtime-portable
   suite compiled into desktop integration tests and the Android, iOS, and
   OpenHarmony application runners. It covers success, typed
   callback/transport failures, every request cancellation facade, drop

@@ -2,9 +2,9 @@
 
 use std::{future::poll_fn, pin::Pin, time::Duration};
 
-use cronet::{BidirectionalRequest, Engine, Error, PublicKeyPins, QuicHint, Request};
 use futures_core::Stream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_cronet::{BidirectionalRequest, Engine, Error, PublicKeyPins, QuicHint, Request};
 
 const HTTP3_HOST: &str = "cloudflare-quic.com";
 const HTTP3_URL: &str = "https://cloudflare-quic.com/";

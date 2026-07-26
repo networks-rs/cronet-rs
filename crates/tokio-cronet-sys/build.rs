@@ -36,12 +36,12 @@ fn main() {
     let workspace = manifest_dir
         .parent()
         .and_then(Path::parent)
-        .expect("cronet-sys must remain inside the workspace");
+        .expect("tokio-cronet-sys must remain inside the workspace");
     let target = env::var("TARGET").expect("Cargo did not set TARGET");
     let linkage = if env::var_os("CARGO_FEATURE_STATIC").is_some() {
-        cronet_src::NativeLinkage::Static
+        tokio_cronet_src::NativeLinkage::Static
     } else {
-        cronet_src::NativeLinkage::Dynamic
+        tokio_cronet_src::NativeLinkage::Dynamic
     };
     let no_link = env::var_os(NO_LINK_ENV).is_some() || env::var_os("DOCS_RS").is_some();
 
@@ -63,7 +63,7 @@ fn main() {
     }
 
     assert!(
-        cronet_src::native_target_supported(&target),
+        tokio_cronet_src::native_target_supported(&target),
         "Cronet native libraries are not supported for Rust target `{target}`"
     );
 
@@ -82,15 +82,15 @@ struct NativeInput {
 fn build_from_source(
     workspace: &Path,
     target: &str,
-    linkage: cronet_src::NativeLinkage,
+    linkage: tokio_cronet_src::NativeLinkage,
 ) -> NativeInput {
     let source = source_for_build(workspace, target);
     println!(
         "cargo:warning=compiling Cronet {} {} library from its filtered source tree for {target}",
-        cronet_src::CHROMIUM_VERSION,
+        tokio_cronet_src::CHROMIUM_VERSION,
         linkage.as_str()
     );
-    let artifacts = cronet_src::Build::new()
+    let artifacts = tokio_cronet_src::Build::new()
         .source_dir(&source)
         .target(target)
         .linkage(linkage)
@@ -114,7 +114,7 @@ fn configured_source(workspace: &Path, target: &str) -> PathBuf {
     {
         return repository_source;
     }
-    cronet_src::source_dir(target)
+    tokio_cronet_src::source_dir(target)
 }
 
 fn source_for_build(workspace: &Path, target: &str) -> PathBuf {
@@ -188,7 +188,7 @@ fn generate_bindings(manifest_dir: &Path, root: &Path) {
         .expect("failed to write generated Cronet bindings");
 }
 
-fn select_library_dir(base: &Path, linkage: cronet_src::NativeLinkage) -> PathBuf {
+fn select_library_dir(base: &Path, linkage: tokio_cronet_src::NativeLinkage) -> PathBuf {
     let nested = base.join(linkage.as_str());
     if nested.is_dir() {
         nested
@@ -197,14 +197,14 @@ fn select_library_dir(base: &Path, linkage: cronet_src::NativeLinkage) -> PathBu
     }
 }
 
-fn emit_link(lib_dir: &Path, root: &Path, linkage: cronet_src::NativeLinkage) {
+fn emit_link(lib_dir: &Path, root: &Path, linkage: tokio_cronet_src::NativeLinkage) {
     assert!(
         native_library_exists(lib_dir, linkage),
         "Cronet {} library not found in {}",
         linkage.as_str(),
         lib_dir.display()
     );
-    if linkage == cronet_src::NativeLinkage::Static {
+    if linkage == tokio_cronet_src::NativeLinkage::Static {
         assert!(
             portable_static_archive_exists(lib_dir),
             "Cronet static library in {} is a GN thin archive or has an invalid format",
@@ -222,10 +222,10 @@ fn emit_link(lib_dir: &Path, root: &Path, linkage: cronet_src::NativeLinkage) {
         println!("cargo:rerun-if-changed={}", entry.display());
     }
     match linkage {
-        cronet_src::NativeLinkage::Dynamic => {
+        tokio_cronet_src::NativeLinkage::Dynamic => {
             println!("cargo:rustc-link-lib=dylib={}", dynamic_link_name(lib_dir));
         }
-        cronet_src::NativeLinkage::Static => {
+        tokio_cronet_src::NativeLinkage::Static => {
             println!("cargo:rustc-link-lib=static=cronet_static");
             emit_static_link_requirements(lib_dir);
         }
@@ -267,7 +267,7 @@ fn dynamic_link_name(lib_dir: &Path) -> String {
             }
         }
     }
-    format!("cronet.{}", cronet_src::CHROMIUM_VERSION)
+    format!("cronet.{}", tokio_cronet_src::CHROMIUM_VERSION)
 }
 
 fn emit_static_link_requirements(lib_dir: &Path) {
@@ -289,7 +289,7 @@ fn emit_static_link_requirements(lib_dir: &Path) {
         } else if let Some(name) = line.strip_prefix("linker-script=") {
             // The .so-named input contains an lld script, not an ELF shared
             // object. Passing it through -l makes this requirement propagate
-            // from cronet-sys to the final Cargo link without a runtime dep.
+            // from tokio-cronet-sys to the final Cargo link without a runtime dep.
             println!("cargo:rustc-link-lib=dylib={name}");
         } else if let Some(framework) = line.strip_prefix("framework=") {
             println!("cargo:rustc-link-lib=framework={framework}");
@@ -302,7 +302,7 @@ fn emit_static_link_requirements(lib_dir: &Path) {
     }
 }
 
-fn native_library_exists(directory: &Path, linkage: cronet_src::NativeLinkage) -> bool {
+fn native_library_exists(directory: &Path, linkage: tokio_cronet_src::NativeLinkage) -> bool {
     let Ok(entries) = fs::read_dir(directory) else {
         return false;
     };
@@ -313,7 +313,7 @@ fn native_library_exists(directory: &Path, linkage: cronet_src::NativeLinkage) -
             .extension()
             .and_then(|value| value.to_str());
         match linkage {
-            cronet_src::NativeLinkage::Dynamic => {
+            tokio_cronet_src::NativeLinkage::Dynamic => {
                 let cronet_name = name.starts_with("libcronet.") || name.starts_with("cronet.");
                 cronet_name
                     && (name.contains(".so.")
@@ -323,7 +323,7 @@ fn native_library_exists(directory: &Path, linkage: cronet_src::NativeLinkage) -
                                 .any(|expected| value.eq_ignore_ascii_case(expected))
                         }))
             }
-            cronet_src::NativeLinkage::Static => {
+            tokio_cronet_src::NativeLinkage::Static => {
                 name == "libcronet_static.a" || name == "cronet_static.lib"
             }
         }

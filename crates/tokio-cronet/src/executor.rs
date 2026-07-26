@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 
-use cronet_sys as sys;
 use tokio::runtime::Handle;
+use tokio_cronet_sys as sys;
 
 use crate::{Error, Result};
 

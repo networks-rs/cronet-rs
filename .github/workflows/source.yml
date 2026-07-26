@@ -72,7 +72,7 @@ jobs:
           export CRONET_SOURCE_DIR="$PWD/.cronet/chromium/src"
           export CRONET_LIB_DIR="$CRONET_SOURCE_DIR/out/cronet-rs/$(printf '%s' '${{ matrix.target }}' | tr -c '[:alnum:]' '_')"
           export MACOSX_DEPLOYMENT_TARGET=12.0
-          cargo test -p cronet --features static,native-tests --test e2e_local --test native_smoke -- --test-threads=1
+          cargo test -p tokio-cronet --features static,native-tests --test e2e_local --test native_smoke -- --test-threads=1
       - name: Test shared source linkage
         shell: bash
         run: |
@@ -82,7 +82,7 @@ jobs:
           export PATH="$CRONET_LIB_DIR:$PATH"
           export LD_LIBRARY_PATH="$CRONET_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export DYLD_LIBRARY_PATH="$CRONET_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-          cargo test -p cronet --features native-tests --test e2e_local --test native_smoke -- --test-threads=1
+          cargo test -p tokio-cronet --features native-tests --test e2e_local --test native_smoke -- --test-threads=1
       - name: Require public HTTP/2 and QUIC protocols
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash
@@ -91,7 +91,7 @@ jobs:
           export CRONET_LIB_DIR="$CRONET_SOURCE_DIR/out/cronet-rs/$(printf '%s' '${{ matrix.target }}' | tr -c '[:alnum:]' '_')"
           export LD_LIBRARY_PATH="$CRONET_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export CRONET_E2E_REQUIRE_QUIC=1
-          cargo test -p cronet --features network-tests --test e2e_network -- --test-threads=1
+          cargo test -p tokio-cronet --features network-tests --test e2e_network -- --test-threads=1
 
   android-source:
     name: Android ${{ matrix.target }} source build

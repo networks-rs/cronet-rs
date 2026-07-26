@@ -10,10 +10,6 @@ use std::{
     time::Duration,
 };
 
-use cronet::dns::{
-    DnsError, DnsResolver, LookupIpStrategy, RData, RecordType, ResolveHosts, ResolverConfig,
-    ResolverOpts,
-};
 use hickory_resolver::proto::{
     op::{Message, MessageType, ResponseCode},
     rr::{
@@ -22,6 +18,10 @@ use hickory_resolver::proto::{
     },
 };
 use tokio::{net::UdpSocket, sync::oneshot, task::JoinHandle, time::timeout};
+use tokio_cronet::dns::{
+    DnsError, DnsResolver, LookupIpStrategy, RData, RecordType, ResolveHosts, ResolverConfig,
+    ResolverOpts,
+};
 
 const TEST_ADDRESS: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 7);
 

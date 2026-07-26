@@ -9,11 +9,11 @@ use std::{
     },
 };
 
-use cronet_sys as sys;
 use tokio::{
     runtime::Handle,
     sync::{Notify, OnceCell, broadcast},
 };
+use tokio_cronet_sys as sys;
 
 use crate::{
     BidirectionalRequest, BidirectionalRequestBuilder, BidirectionalStream, Error, PendingRequest,

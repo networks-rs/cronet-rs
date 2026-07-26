@@ -27,9 +27,9 @@ stale rows. It also rejects scenario names that do not occur in test sources.
 | Concurrency/lifetime | concurrent requests, repeated cancellation from cloned handles, callback completion during drop, concurrent shutdown, engine drop with active work |
 | Native delivery | shared and static linkage execute the same suite; mobile/OpenHarmony application runners compile the same portable scenario source |
 
-`crates/cronet/tests/support/portable_e2e.rs` is included directly by desktop,
-Android/iOS, and OHOS
-runners so platform suites cannot silently drift. Desktop-only cache/NetLog
+`crates/tokio-cronet/tests/support/portable_e2e.rs` is included directly by
+desktop, Android/iOS, and OHOS runners so platform suites cannot silently
+drift. Desktop-only cache/NetLog
 tests and public-network HTTP/2/HTTP/3 tests extend it where loopback or mobile
 sandboxing cannot provide the protocol.
 

@@ -21,12 +21,12 @@ use std::{
     time::Duration,
 };
 
-use cronet::{
+use futures_core::Stream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWriteExt, ReadBuf};
+use tokio_cronet::{
     BidirectionalRequest, CacheMode, Engine, Error, FinishedReason, Idempotency, Priority,
     PublicKeyPins, QuicHint, RedirectAction, Request, RequestFinishedInfo, RequestStatus,
 };
-use futures_core::Stream;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWriteExt, ReadBuf};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -847,7 +847,11 @@ pub async fn bidirectional_configuration_and_failure_are_safe() {
     engine.shutdown().await.unwrap();
 }
 
-fn annotated_pending(engine: &Engine, server: &TestServer, name: &str) -> cronet::PendingRequest {
+fn annotated_pending(
+    engine: &Engine,
+    server: &TestServer,
+    name: &str,
+) -> tokio_cronet::PendingRequest {
     let pending = engine
         .start(
             Request::builder(server.url("/slow-headers"))
@@ -862,14 +866,14 @@ fn annotated_pending(engine: &Engine, server: &TestServer, name: &str) -> cronet
     pending
 }
 
-async fn assert_canceled(request: cronet::PendingRequest) {
+async fn assert_canceled(request: tokio_cronet::PendingRequest) {
     assert!(matches!(
         timeout("pending request cancellation", request).await,
         Err(Error::Canceled)
     ));
 }
 
-async fn wait_done(handle: &cronet::RequestHandle) {
+async fn wait_done(handle: &tokio_cronet::RequestHandle) {
     timeout("request handle terminal state", async {
         while !handle.is_done() {
             tokio::task::yield_now().await;

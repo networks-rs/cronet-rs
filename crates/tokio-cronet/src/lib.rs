@@ -40,6 +40,6 @@ pub mod android {
     /// `JNI_OnLoad`, and initialization must happen only once.
     pub unsafe fn initialize_java_vm(java_vm: *mut c_void) -> c_int {
         // SAFETY: upheld by this function's caller contract.
-        unsafe { cronet_sys::Cronet_RS_InitializeJavaVM(java_vm) }
+        unsafe { tokio_cronet_sys::Cronet_RS_InitializeJavaVM(java_vm) }
     }
 }

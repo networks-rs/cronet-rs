@@ -1,12 +1,12 @@
-# cronet-rs
+# tokio-cronet
 
 Safe, source-built Rust bindings for Chromium's native Cronet C API, with a
 Tokio-native streaming interface.
 
-`cronet-rs` ships no prebuilt native libraries. `cronet-sys` generates its raw
-bindings from the pinned upstream headers and builds Cronet from source for the
-current Cargo target. Shared linking is the default; the additive `static`
-feature builds a complete static archive.
+`tokio-cronet` ships no prebuilt native libraries. `tokio-cronet-sys`
+generates its raw bindings from the pinned upstream headers and builds Cronet
+from source for the current Cargo target. Shared linking is the default; the
+additive `static` feature builds a complete static archive.
 
 > **Upstream status:** Chromium removed `//components/cronet/native` on
 > 2026-01-13 because the C API was never officially supported. This workspace
@@ -38,7 +38,7 @@ are enabled by default:
 
 ```toml
 [dependencies]
-cronet = "0.1"
+tokio-cronet = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -46,7 +46,7 @@ To build Cronet as a static library, select the dependency feature instead:
 
 ```toml
 [dependencies]
-cronet = { version = "0.1", features = ["static"] }
+tokio-cronet = { version = "0.1", features = ["static"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -78,7 +78,7 @@ mechanism. Static mode has no Cronet runtime-library deployment step.
 ### Make a request
 
 ```rust,no_run
-use cronet::{Engine, Request};
+use tokio_cronet::{Engine, Request};
 use tokio::io::AsyncReadExt;
 
 #[tokio::main]
@@ -114,10 +114,10 @@ request handle also supports explicit cancellation from `tokio::select!` or
 another task:
 
 ```rust,no_run
-use cronet::{Engine, Request};
+use tokio_cronet::{Engine, Request};
 use std::time::Duration;
 
-async fn selectable(engine: &Engine) -> cronet::Result<()> {
+async fn selectable(engine: &Engine) -> tokio_cronet::Result<()> {
     let request = Request::builder("https://example.com/slow")?.build()?;
     let pending = engine.start(request)?;
     let handle = pending.handle();
@@ -126,7 +126,7 @@ async fn selectable(engine: &Engine) -> cronet::Result<()> {
         response = pending => response?,
         () = tokio::time::sleep(Duration::from_secs(10)) => {
             handle.cancel();
-            return Err(cronet::Error::Canceled);
+            return Err(tokio_cronet::Error::Canceled);
         }
     };
     drop(response);
@@ -144,7 +144,7 @@ backpressure. Uploads accept `Bytes`, Tokio `AsyncRead`, or rewindable
 The upstream gRPC-support C API is exposed as a bounded HTTP/2 or HTTP/3 stream:
 
 ```rust,no_run
-use cronet::{BidirectionalRequest, Engine};
+use tokio_cronet::{BidirectionalRequest, Engine};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn rpc(engine: &Engine) -> Result<(), Box<dyn std::error::Error>> {
@@ -181,7 +181,7 @@ Hickory. It supports system configuration, explicit upstream servers,
 IPv4/IPv6 lookup, reverse lookup, and typed queries for Hickory record types:
 
 ```rust,no_run
-use cronet::dns::{DnsResolver, RData, RecordType};
+use tokio_cronet::dns::{DnsResolver, RData, RecordType};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -206,7 +206,7 @@ point, so `Engine` requests continue to use Chromium's internal host resolver.
 Disable the helper when it is not needed:
 
 ```toml
-cronet = { version = "0.1", default-features = false }
+tokio-cronet = { version = "0.1", default-features = false }
 ```
 
 There is no OpenSSL dependency to replace. Cronet uses Chromium's BoringSSL
@@ -219,21 +219,21 @@ See the [DNS integration guide](docs/dns.md) for the exact boundary.
 This repository is a standard Cargo workspace:
 
 ```text
-crates/cronet-sys  generated raw FFI bindings and Cargo build integration
-crates/cronet      safe Tokio API
-xtask              cronet-src package and source/build CLI
+crates/tokio-cronet-sys  generated raw FFI bindings and Cargo build integration
+crates/tokio-cronet      safe Tokio API
+xtask                    tokio-cronet-src package and source/build CLI
 ```
 
-`cronet-sys` contains no copied or hand-maintained FFI declarations. Its build
-script asks `cronet-src` to locate or materialize the pinned source tree, runs
-bindgen against the upstream headers, and builds the selected native linkage.
-The safe crate owns the engine, executor, callback contexts, requests, upload
-providers, listeners, and reusable Cronet buffers.
+`tokio-cronet-sys` contains no copied or hand-maintained FFI declarations. Its
+build script asks `tokio-cronet-src` to locate or materialize the pinned source
+tree, runs bindgen against the upstream headers, and builds the selected native
+linkage. The safe crate owns the engine, executor, callback contexts, requests,
+upload providers, listeners, and reusable Cronet buffers.
 
 The networking API exposes no raw pointers or unsafe operations. The sole
 platform boundary is static Android embedding:
-`cronet::android::initialize_java_vm` is unsafe because the application must
-forward the process `JavaVM*` received by `JNI_OnLoad`.
+`tokio_cronet::android::initialize_java_vm` is unsafe because the application
+must forward the process `JavaVM*` received by `JNI_OnLoad`.
 
 ## Supported native targets
 
@@ -252,11 +252,11 @@ target SDK/NDK; iOS builds require macOS and Xcode.
 
 ## Source-build model
 
-`cronet-src::Build` follows the same role as `openssl-src`. It resolves source
-in this order:
+`tokio-cronet-src::Build` follows the same role as `openssl-src`. It resolves
+source in this order:
 
 1. `CRONET_SOURCE_DIR`, when explicitly configured;
-2. `vendor/chromium/src` in a fully vendored `cronet-src` distribution;
+2. `vendor/chromium/src` in a fully vendored `tokio-cronet-src` distribution;
 3. a persistent target-specific cache materialized from the locked revision.
 
 The third path downloads source and required build tools, never a native Cronet
@@ -292,9 +292,9 @@ Build both native forms and expose their paths to subsequent Cargo commands:
 ```sh
 cargo xtask build --release --linkage both
 eval "$(cargo xtask print-env)" # macOS/Linux
-cargo build -p cronet --release
-cargo build -p cronet --release --features static
-cargo run --release -p cronet --features native-example --example get
+cargo build -p tokio-cronet --release
+cargo build -p tokio-cronet --release --features static
+cargo run --release -p tokio-cronet --features native-example --example get
 ```
 
 On Windows, apply the `set ...` lines emitted by `cargo xtask print-env` in
@@ -337,7 +337,7 @@ upstream checkout.
 The default API level is 23. Build output includes the native library, minimal
 Java support JAR, and pre-dexed JAR used by Chromium's proxy, certificate, and
 network-change bridges. Static applications must forward `JNI_OnLoad` to
-`cronet::android::initialize_java_vm`.
+`tokio_cronet::android::initialize_java_vm`.
 
 **iOS:** build on macOS with Xcode. ARM64 device and both Rust Simulator
 targets are supported. Shared libraries use relocatable `@rpath` install names;
@@ -365,25 +365,25 @@ QEMU/device harness is documented under
 ### Offline source delivery
 
 Crates.io limits a `.crate` archive to 10 MiB, so it cannot contain the
-approximately 3.7 GiB filtered source closure. The small `cronet-src` crate
-therefore carries the revision lock, filter, patches, and build logic, then
-materializes source on first use.
+approximately 3.7 GiB filtered source closure. The small `tokio-cronet-src`
+crate therefore carries the revision lock, filter, patches, and build logic,
+then materializes source on first use.
 
 For a private registry or dedicated large-source repository, prepare the
 fully vendored package with:
 
 ```sh
 cargo xtask vendor-source
-cargo package -p cronet-src --allow-dirty --no-verify
+cargo package -p tokio-cronet-src --allow-dirty --no-verify
 ```
 
 `vendor-source` writes `xtask/vendor/chromium/src`, preserving required
 symlinks while excluding Git metadata, output directories, and Python caches.
-Consumers can redirect `cronet-src` without changing `cronet-sys`:
+Consumers can redirect `tokio-cronet-src` without changing `tokio-cronet-sys`:
 
 ```toml
 [patch.crates-io]
-cronet-src = { path = "../cronet-src" }
+tokio-cronet-src = { path = "../tokio-cronet-src" }
 ```
 
 ## Verification
@@ -394,7 +394,7 @@ Run the source-independent checks after an API-only sync:
 cargo xtask sync --api-only
 CRONET_SYS_NO_LINK=1 cargo fmt --all -- --check
 CRONET_SYS_NO_LINK=1 cargo clippy --workspace --all-targets -- -D warnings
-CRONET_SYS_NO_LINK=1 cargo test -p cronet --test dns_e2e
+CRONET_SYS_NO_LINK=1 cargo test -p tokio-cronet --test dns_e2e
 CRONET_SYS_NO_LINK=1 cargo check --workspace --all-targets
 cargo xtask audit-e2e
 ```
@@ -404,15 +404,15 @@ local and public-network scenarios:
 
 ```sh
 eval "$(cargo xtask print-env)"
-cargo test -p cronet --features native-tests --test native_smoke
-cargo test -p cronet --features native-tests --test e2e_local -- --test-threads=1
-cargo test -p cronet --features static,native-tests --test native_smoke
-cargo test -p cronet --features static,native-tests --test e2e_local -- --test-threads=1
-cargo test -p cronet --features network-tests --test e2e_network -- --test-threads=1
+cargo test -p tokio-cronet --features native-tests --test native_smoke
+cargo test -p tokio-cronet --features native-tests --test e2e_local -- --test-threads=1
+cargo test -p tokio-cronet --features static,native-tests --test native_smoke
+cargo test -p tokio-cronet --features static,native-tests --test e2e_local -- --test-threads=1
+cargo test -p tokio-cronet --features network-tests --test e2e_network -- --test-threads=1
 ```
 
 Desktop, Android, iOS, and OpenHarmony runners share
-[`portable_e2e.rs`](crates/cronet/tests/support/portable_e2e.rs). Cache/NetLog
+[`portable_e2e.rs`](crates/tokio-cronet/tests/support/portable_e2e.rs). Cache/NetLog
 and public HTTP/2 or HTTP/3 cases add platform- and protocol-specific coverage.
 The complete safety contract is documented in
 [`docs/e2e-safety.md`](docs/e2e-safety.md).

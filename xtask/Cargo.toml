@@ -1,6 +1,6 @@
 [package]
-name = "cronet-src"
-description = "Pinned Cronet source and native build support for cronet-rs"
+name = "tokio-cronet-src"
+description = "Pinned Cronet source and native build support for tokio-cronet"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,7 @@ autobins = false
 include = ["Cargo.toml", "README.md", "SOURCE.lock", "filter_deps.py", "src/**/*.rs", "vendor/**"]
 
 [lib]
-name = "cronet_src"
+name = "tokio_cronet_src"
 path = "src/main.rs"
 
 [[bin]]

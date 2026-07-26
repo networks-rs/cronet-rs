@@ -113,7 +113,7 @@ android_library("cronet_rs_android_build_config_java") {
 
 # Chromium's Android net implementation calls these Java classes from native
 # code. Keep the jar deliberately narrower than the public Cronet Java API: a
-# Rust application uses Cronet through cronet-sys and only needs the platform
+# Rust application uses Cronet through tokio-cronet-sys and only needs the platform
 # bridge and its runtime dependencies.
 dist_jar("cronet_rs_android_support_java") {
   output = "$root_out_dir/cronet-android-support.jar"

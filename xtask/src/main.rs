@@ -18,14 +18,14 @@ const ANDROID_API_LEVEL_ENV: &str = "ANDROID_API_LEVEL";
 const CLANG_DIR_ENV: &str = "CRONET_CLANG_DIR";
 const RUST_BINDGEN_ENV: &str = "CRONET_RUST_BINDGEN";
 
-/// Native library form selected by `cronet-sys` or the workspace CLI.
+/// Native library form selected by `tokio-cronet-sys` or the workspace CLI.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeLinkage {
     Dynamic,
     Static,
 }
 
-/// Source-build result consumed by `cronet-sys`.
+/// Source-build result consumed by `tokio-cronet-sys`.
 #[derive(Debug)]
 pub struct Artifacts {
     source_dir: PathBuf,
@@ -371,7 +371,7 @@ fn audit_e2e(args: &[std::ffi::OsString]) -> Result<(), String> {
 
     let mut test_sources = String::new();
     collect_test_sources(&root.join("tests"), &mut test_sources)?;
-    collect_test_sources(&root.join("crates/cronet/tests"), &mut test_sources)?;
+    collect_test_sources(&root.join("crates/tokio-cronet/tests"), &mut test_sources)?;
     let missing_scenarios = mapped
         .values()
         .filter(|scenario| !test_sources.contains(scenario.as_str()))
@@ -394,7 +394,7 @@ fn audit_e2e(args: &[std::ffi::OsString]) -> Result<(), String> {
 }
 
 fn public_safe_api(root: &Path) -> Result<BTreeSet<String>, String> {
-    let source = root.join("crates/cronet/src");
+    let source = root.join("crates/tokio-cronet/src");
     let mut api = BTreeSet::new();
     for file in [
         "bidirectional.rs",
@@ -478,7 +478,7 @@ fn collect_test_sources(directory: &Path, output: &mut String) -> Result<(), Str
 /// Ensures that a release Cronet library exists for `target`, synchronizing
 /// only the pinned Cronet build closure and compiling it when necessary.
 ///
-/// This entry point is used by `cronet-sys` for every linked build. The source
+/// This entry point is used by `tokio-cronet-sys` for every linked build. The source
 /// directory should be target-specific so libraries for different
 /// architectures never overwrite each other.
 pub fn ensure_native_from_source(
@@ -798,7 +798,7 @@ fn bundle_static_archive(source: &Path, build_dir: &Path, output_dir: &Path) -> 
     }
     for relative in rust_archives.split_ascii_whitespace() {
         if is_chromium_rust_allocator_shim(relative) {
-            // cronet-src is a Rust native dependency, so the final Cargo
+            // tokio-cronet-src is a Rust native dependency, so the final Cargo
             // artifact supplies these lang-item allocator symbols. Bundling
             // Chromium's executable-oriented shim as well causes duplicate
             // `__rust_alloc*` definitions on strict ELF linkers such as OHOS
@@ -931,7 +931,7 @@ fn write_static_link_manifest(
         String::new()
     };
     let mut manifest =
-        String::from("# Generated from the pinned GN target; consumed by cronet-sys.\n");
+        String::from("# Generated from the pinned GN target; consumed by tokio-cronet-sys.\n");
     for library in libraries
         .lines()
         .map(str::trim)
@@ -1777,7 +1777,7 @@ fn rust_stdlib_adjustments(
 ) -> Result<(Vec<String>, Vec<String>), String> {
     // Chromium names every rlib that must be handed to the C++ linker. Rust
     // occasionally adds or renames internal std crates, so derive the delta
-    // from the selected toolchain instead of binding cronet-src to one rustc.
+    // from the selected toolchain instead of binding tokio-cronet-src to one rustc.
     const CHROMIUM_STDLIBS: &[&str] = &[
         "std",
         "alloc",
@@ -3633,7 +3633,7 @@ fn patch_android_gclient_args(source: &Path, overlay: &Path) -> Result<(), Strin
     let contents = if contents.contains("checkout_android = false") {
         contents.replacen(
             "checkout_android = false",
-            "checkout_android = true  # cronet-src supplies an external Android NDK",
+            "checkout_android = true  # tokio-cronet-src supplies an external Android NDK",
             1,
         )
     } else if contents.contains("checkout_android = true") {
@@ -3653,7 +3653,7 @@ fn patch_android_gclient_args(source: &Path, overlay: &Path) -> Result<(), Strin
 fn patch_android_host_os(source: &Path, overlay: &Path) -> Result<(), String> {
     const MARKER: &str =
         "  assert(host_os == \"linux\", \"Android builds are only supported on Linux.\")";
-    const PATCH: &str = "  # The external NDK also ships native macOS host tools. Chromium labels\n  # this configuration best-effort; cronet-src verifies its reduced C API graph.\n  assert(host_os == \"linux\" || host_os == \"mac\",\n         \"Android builds require a Linux or macOS host.\")";
+    const PATCH: &str = "  # The external NDK also ships native macOS host tools. Chromium labels\n  # this configuration best-effort; tokio-cronet-src verifies its reduced C API graph.\n  assert(host_os == \"linux\" || host_os == \"mac\",\n         \"Android builds require a Linux or macOS host.\")";
 
     let source_config = source.join("build/config");
     let overlay_config = overlay.join("build/config");
@@ -3721,10 +3721,10 @@ declare_args() {
   cronet_ohos_target_runtime_dir = ""
 }
 
-assert(cronet_ohos_sdk_native != "", "cronet-src requires the OHOS Native SDK")
-assert(cronet_ohos_llvm_triple != "", "cronet-src requires an OHOS LLVM target")
-assert(cronet_ohos_compiler_resource_dir != "", "cronet-src requires the OHOS compiler runtime")
-assert(cronet_ohos_target_runtime_dir != "", "cronet-src requires the OHOS target runtime")
+assert(cronet_ohos_sdk_native != "", "tokio-cronet-src requires the OHOS Native SDK")
+assert(cronet_ohos_llvm_triple != "", "tokio-cronet-src requires an OHOS LLVM target")
+assert(cronet_ohos_compiler_resource_dir != "", "tokio-cronet-src requires the OHOS compiler runtime")
+assert(cronet_ohos_target_runtime_dir != "", "tokio-cronet-src requires the OHOS target runtime")
 
 _clang_base = "//third_party/llvm-build/Release+Asserts"
 _bin = rebase_path(_clang_base + "/bin", root_build_dir)
@@ -3781,7 +3781,7 @@ fn patch_ohos_rust_target(source: &Path, overlay: &Path) -> Result<(), String> {
         "declare_args() {\n  # Set to enable the official build level of optimization.";
     const BUILDCONFIG_PATCH: &str = "declare_args() {\n  # cronet-rs models OHOS as Linux for Chromium's existing POSIX graph.\n  # Keep the actual target identity globally visible to compatibility logic.\n  cronet_target_ohos = false\n  cronet_ohos_llvm_triple = \"\"\n  cronet_ohos_rust_triple = \"\"\n\n  # Set to enable the official build level of optimization.";
     const RUST_TARGET_MARKER: &str = "rust_abi_target = \"\"\nif (is_linux || is_chromeos) {";
-    const RUST_TARGET_PATCH: &str = "rust_abi_target = \"\"\nif (cronet_target_ohos && is_a_target_toolchain) {\n  assert(cronet_ohos_rust_triple != \"\", \"cronet-src requires an OHOS Rust target\")\n  rust_abi_target = cronet_ohos_rust_triple\n} else if (is_linux || is_chromeos) {";
+    const RUST_TARGET_PATCH: &str = "rust_abi_target = \"\"\nif (cronet_target_ohos && is_a_target_toolchain) {\n  assert(cronet_ohos_rust_triple != \"\", \"tokio-cronet-src requires an OHOS Rust target\")\n  rust_abi_target = cronet_ohos_rust_triple\n} else if (is_linux || is_chromeos) {";
     const KNOWN_TARGET_MARKER: &str = "  assert(_is_rust_abi_target_a_known_triple,\n         \"`${rust_abi_target}` needs to be added to \" +";
     const KNOWN_TARGET_PATCH: &str = "  assert(_is_rust_abi_target_a_known_triple || cronet_target_ohos,\n         \"`${rust_abi_target}` needs to be added to \" +";
 
@@ -3834,7 +3834,7 @@ fn patch_ohos_rust_target(source: &Path, overlay: &Path) -> Result<(), String> {
 fn patch_ohos_compiler_config(source: &Path, overlay: &Path) -> Result<(), String> {
     const TARGET_MARKER: &str =
         "config(\"compiler\") {\n  asmflags = []\n  cflags = []\n  cflags_c = []";
-    const TARGET_PATCH: &str = "config(\"compiler\") {\n  asmflags = []\n  cflags = []\n  if (cronet_target_ohos) {\n    assert(cronet_ohos_llvm_triple != \"\", \"cronet-src requires an OHOS LLVM target\")\n    # Action-based Clang consumers such as bindgen do not inherit the compiler\n    # executable's extra flags, so the ABI target must also be a config flag.\n    cflags += [ \"--target=\" + cronet_ohos_llvm_triple ]\n  }\n  cflags_c = []";
+    const TARGET_PATCH: &str = "config(\"compiler\") {\n  asmflags = []\n  cflags = []\n  if (cronet_target_ohos) {\n    assert(cronet_ohos_llvm_triple != \"\", \"tokio-cronet-src requires an OHOS LLVM target\")\n    # Action-based Clang consumers such as bindgen do not inherit the compiler\n    # executable's extra flags, so the ABI target must also be a config flag.\n    cflags += [ \"--target=\" + cronet_ohos_llvm_triple ]\n  }\n  cflags_c = []";
     const RUST_CHECK_MARKER: &str = "if (toolchain_has_rust && _perform_consistency_checks &&\n        !rust_force_head_revision) {";
     const RUST_CHECK_PATCH: &str = "if (toolchain_has_rust && _perform_consistency_checks &&\n        !rust_force_head_revision && !cronet_target_ohos) {";
     const CREL_MARKER: &str =
@@ -4989,7 +4989,10 @@ after"#;
 
     #[test]
     fn discovers_ohos_runtime_only_below_the_selected_sdk() {
-        let root = env::temp_dir().join(format!("cronet-src-ohos-sdk-test-{}", std::process::id()));
+        let root = env::temp_dir().join(format!(
+            "tokio-cronet-src-ohos-sdk-test-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
         for version in ["15.0.4", "22.1.0"] {
             let runtime = root
@@ -5008,7 +5011,8 @@ after"#;
 
     #[test]
     fn vendored_tree_excludes_repository_and_build_state() {
-        let root = env::temp_dir().join(format!("cronet-src-copy-test-{}", std::process::id()));
+        let root =
+            env::temp_dir().join(format!("tokio-cronet-src-copy-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let source = root.join("source");
         let destination = root.join("destination");

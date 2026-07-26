@@ -15,13 +15,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use cronet::{
-    CacheMode, Engine, Error, FinishedReason, Idempotency, Priority, PublicKeyPins, QuicHint,
-    RedirectAction, Request, RequestStatus,
-};
 use futures_core::Stream;
 use support::TestServer;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWriteExt, ReadBuf};
+use tokio_cronet::{
+    CacheMode, Engine, Error, FinishedReason, Idempotency, Priority, PublicKeyPins, QuicHint,
+    RedirectAction, Request, RequestStatus,
+};
 
 fn temporary_path(name: &str) -> PathBuf {
     let unique = SystemTime::now()

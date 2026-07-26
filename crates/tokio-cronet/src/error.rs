@@ -1,6 +1,6 @@
 use std::{error, fmt};
 
-use cronet_sys as sys;
+use tokio_cronet_sys as sys;
 
 use crate::ResponseInfo;
 

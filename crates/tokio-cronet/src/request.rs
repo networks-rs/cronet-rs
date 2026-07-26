@@ -13,13 +13,13 @@ use std::{
 };
 
 use bytes::{Buf, Bytes};
-use cronet_sys as sys;
 use futures_core::Stream;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, ReadBuf},
     runtime::Handle,
     sync::{mpsc, oneshot, watch},
 };
+use tokio_cronet_sys as sys;
 
 use crate::{
     Engine, Error, Header, RedirectInfo, RequestFinishedInfo, RequestStatus, Response,

@@ -1,6 +1,6 @@
 # Rust-native DNS integration
 
-The `cronet` crate enables its `dns` feature by default. The feature uses
+The `tokio-cronet` crate enables its `dns` feature by default. The feature uses
 Hickory 0.25, which supports the workspace's Rust 1.85 minimum version, and
 executes DNS I/O directly on Tokio.
 
@@ -9,7 +9,7 @@ executes DNS I/O directly on Tokio.
 There are two deliberately separate resolution paths:
 
 ```text
-application lookup ── cronet::dns::DnsResolver ── Hickory ── configured DNS
+application lookup ── tokio_cronet::dns::DnsResolver ── Hickory ── configured DNS
 
 Cronet request ── Chromium net::HostResolver ── Chromium sockets
                └─ Chromium TLS/QUIC ── bundled BoringSSL
@@ -31,23 +31,23 @@ not replace that implementation.
 Use the platform DNS configuration when it is available:
 
 ```rust,no_run
-use cronet::dns::DnsResolver;
+use tokio_cronet::dns::DnsResolver;
 
 let resolver = DnsResolver::from_system()?;
-# Ok::<(), cronet::dns::DnsError>(())
+# Ok::<(), tokio_cronet::dns::DnsError>(())
 ```
 
 Containers, mobile applications, and controlled deployments can supply
 portable upstream addresses instead:
 
 ```rust,no_run
-use cronet::dns::{DnsResolver, ResolverOpts};
+use tokio_cronet::dns::{DnsResolver, ResolverOpts};
 
 let resolver = DnsResolver::from_name_servers(
     ["192.0.2.53:53".parse().unwrap()],
     ResolverOpts::default(),
 )?;
-# Ok::<(), cronet::dns::DnsError>(())
+# Ok::<(), tokio_cronet::dns::DnsError>(())
 ```
 
 Each address supplied to `from_name_servers` is configured for UDP plus TCP
@@ -69,7 +69,7 @@ follows the response TTL and configured minimum/maximum TTL rules.
 To omit this independent resolver and its dependency graph:
 
 ```toml
-cronet = { version = "0.1", default-features = false }
+tokio-cronet = { version = "0.1", default-features = false }
 ```
 
 This feature selection does not change how Cronet resolves request hostnames or
