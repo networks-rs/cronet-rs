@@ -18,6 +18,17 @@ functions to safe callers.
 | Source delivery | `cronet-src::Build` prefers an explicit or vendored tree and otherwise materializes the pinned, filtered source cache; it never downloads a native library | Source-selection unit tests and six-target CI |
 | OpenHarmony source build | The same builder discovers a caller-selected Native SDK and supports ARMv7, ARM64, and x86-64 without assuming a DevEco installation path | Shared/static build matrix for all three targets; application-level ARM64 QEMU E2E |
 
+## DNS and TLS boundary
+
+| Capability | Safe/Tokio API | Verification |
+| --- | --- | --- |
+| Application-side system DNS | Default `dns` feature; `DnsResolver::from_system` uses Hickory on Tokio | Host configuration E2E |
+| Portable explicit upstreams | `DnsResolver::from_name_servers` configures UDP and TCP without platform SDK paths | Process-local UDP DNS E2E |
+| Complete typed DNS queries | `lookup` accepts every Hickory `RecordType` and returns owned records/TTL/`RData`; `lookup_ip` and `reverse_lookup` are typed conveniences | Local A, TXT, and PTR E2E |
+| DNS caching and diagnostics | Shared resolver cache, `clear_cache`, effective config/options, structured NXDOMAIN/no-record errors | Cache hit/flush and NXDOMAIN E2E |
+| Cronet request resolution | Remains Chromium `HostResolver`; upstream exposes no safe custom-resolver injection point | Architecture audit against the pinned C API |
+| HTTPS/QUIC TLS | Remains Chromium's bundled BoringSSL; this workspace has no OpenSSL dependency and upstream exposes no TLS-provider injection point | Dependency and native-source audit; HTTPS/HTTP2/QUIC E2E |
+
 ## Engine and configuration
 
 | Upstream capability | Safe/Tokio API | Verification |
@@ -112,7 +123,7 @@ unsafe native-test code.
 - `cargo xtask audit-e2e` derives the public function set from the safe crate
   and compares it with `tests/e2e-coverage.tsv`. A new public function without
   a concrete test symbol, a removed function with a stale mapping, or a mapping
-  to a missing test source fails CI. The current manifest covers 93 functions.
+  to a missing test source fails CI. The current manifest covers 105 functions.
 - `crates/cronet/tests/support/portable_e2e.rs` is the single runtime-portable
   suite compiled into desktop integration tests and the Android, iOS, and
   OpenHarmony application runners. It covers success, typed
@@ -125,6 +136,9 @@ unsafe native-test code.
 - `network-tests` additionally runs a real TLS HTTP/2 full-duplex exchange and
   an HTTP/3/QUIC exchange. Networks may block UDP; setting
   `CRONET_E2E_REQUIRE_QUIC=1` turns QUIC fallback into a failure.
+- `dns_e2e` runs a process-local authoritative UDP service and covers custom
+  configuration, typed queries, cache behavior, and structured failures
+  without a public network or native Cronet library.
 - Every desktop source-build CI target runs the deterministic suite. Linux
   x86-64 also runs a protocol gate with `CRONET_E2E_REQUIRE_QUIC=1`.
 - Android and iOS runners compile the same portable source rather than a

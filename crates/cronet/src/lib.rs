@@ -1,6 +1,8 @@
 //! Safe Rust bindings for Chromium Cronet.
 
 mod bidirectional;
+#[cfg(feature = "dns")]
+pub mod dns;
 mod engine;
 mod error;
 mod executor;

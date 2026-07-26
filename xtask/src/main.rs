@@ -398,6 +398,7 @@ fn public_safe_api(root: &Path) -> Result<BTreeSet<String>, String> {
     let mut api = BTreeSet::new();
     for file in [
         "bidirectional.rs",
+        "dns.rs",
         "engine.rs",
         "request.rs",
         "types.rs",
@@ -1820,11 +1821,11 @@ fn rust_stdlib_adjustments(
         else {
             continue;
         };
-        if let Some((crate_name, hash)) = name.rsplit_once('-')
-            && !crate_name.is_empty()
-            && hash.chars().all(|character| character.is_ascii_hexdigit())
-        {
-            actual.insert(crate_name.to_owned());
+        if let Some((crate_name, hash)) = name.rsplit_once('-') {
+            if !crate_name.is_empty() && hash.chars().all(|character| character.is_ascii_hexdigit())
+            {
+                actual.insert(crate_name.to_owned());
+            }
         }
     }
     let expected = CHROMIUM_STDLIBS

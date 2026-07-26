@@ -1089,11 +1089,20 @@ struct CallbackContext {
     annotations: Vec<Annotation>,
 }
 
-#[derive(Default)]
 struct CallbackState {
     buffer: sys::Cronet_BufferPtr,
     received: usize,
     terminal: bool,
+}
+
+impl Default for CallbackState {
+    fn default() -> Self {
+        Self {
+            buffer: ptr::null_mut(),
+            received: 0,
+            terminal: false,
+        }
+    }
 }
 
 // SAFETY: buffer ownership crosses Cronet's network thread and Tokio executor;

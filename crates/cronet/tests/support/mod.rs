@@ -2,8 +2,8 @@
 
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Read, Write},
-    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
+    io::{self, BufRead, BufReader, Read, Write},
+    net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -38,6 +38,9 @@ impl TestServer {
             while !worker_stopping.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("make accepted E2E socket blocking");
                         let cache_requests = worker_cache_requests.clone();
                         let paths = worker_paths.clone();
                         thread::spawn(move || handle_connection(stream, &cache_requests, &paths));
@@ -96,8 +99,10 @@ struct TestRequest {
     path: String,
     headers: HashMap<String, String>,
     body: Vec<u8>,
+    body_complete: bool,
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_connection(
     mut stream: TcpStream,
     cache_requests: &AtomicUsize,
@@ -106,13 +111,40 @@ fn handle_connection(
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set local E2E read timeout");
-    let Ok(request) = read_request(&stream) else {
-        return;
+    let request = match read_request(&stream) {
+        Ok(request) => request,
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::WouldBlock
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::ConnectionReset
+            ) {
+                respond(&mut stream, 400, "Bad Request", &[], b"incomplete request");
+            } else {
+                eprintln!("local E2E server could not read request: {error}");
+            }
+            return;
+        }
     };
     paths
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(request.path.clone());
+    if !request.body_complete {
+        if request.path == "/redirect307" {
+            respond_empty(
+                &mut stream,
+                307,
+                "Temporary Redirect",
+                &[("Location", "/echo")],
+            );
+        } else {
+            respond(&mut stream, 400, "Bad Request", &[], b"incomplete request");
+        }
+        return;
+    }
 
     match request.path.as_str() {
         "/inspect" => {
@@ -207,7 +239,7 @@ fn read_request(stream: &TcpStream) -> std::io::Result<TestRequest> {
     reader.read_line(&mut request_line)?;
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_owned();
-    let path = parts.next().unwrap_or_default().to_owned();
+    let path = normalize_request_target(parts.next().unwrap_or_default());
     let mut headers = HashMap::new();
     loop {
         let mut line = String::new();
@@ -219,25 +251,49 @@ fn read_request(stream: &TcpStream) -> std::io::Result<TestRequest> {
             headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
         }
     }
-    let body = if let Some(length) = headers.get("content-length") {
+    if headers
+        .get("expect")
+        .is_some_and(|value| value.eq_ignore_ascii_case("100-continue"))
+    {
+        let mut writer = stream.try_clone()?;
+        writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+        writer.flush()?;
+    }
+    let (body, body_complete) = if let Some(length) = headers.get("content-length") {
         let length = length.parse::<usize>().map_err(std::io::Error::other)?;
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body)?;
-        body
+        let mut body = Vec::with_capacity(length);
+        let read = reader
+            .by_ref()
+            .take(u64::try_from(length).expect("request length fits u64"))
+            .read_to_end(&mut body);
+        let complete = read.is_ok() && body.len() == length;
+        (body, complete)
     } else if headers
         .get("transfer-encoding")
         .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
     {
-        read_chunked(&mut reader)?
+        (read_chunked(&mut reader)?, true)
     } else {
-        Vec::new()
+        (Vec::new(), true)
     };
     Ok(TestRequest {
         method,
         path,
         headers,
         body,
+        body_complete,
     })
+}
+
+fn normalize_request_target(target: &str) -> String {
+    for scheme in ["http://", "https://"] {
+        if let Some(remainder) = target.strip_prefix(scheme) {
+            return remainder
+                .find('/')
+                .map_or_else(|| "/".to_owned(), |index| remainder[index..].to_owned());
+        }
+    }
+    target.to_owned()
 }
 
 fn read_chunked(reader: &mut impl BufRead) -> std::io::Result<Vec<u8>> {
@@ -278,27 +334,38 @@ fn respond(
     headers: &[(&str, &str)],
     body: &[u8],
 ) {
-    write!(
+    let _ = write!(
         stream,
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
-    )
-    .expect("write local E2E response headers");
+    );
     for (name, value) in headers {
-        write!(stream, "{name}: {value}\r\n").expect("write local E2E response header");
+        let _ = write!(stream, "{name}: {value}\r\n");
     }
-    stream
-        .write_all(b"\r\n")
-        .expect("finish local E2E response headers");
-    stream
-        .write_all(body)
-        .expect("write local E2E response body");
+    let _ = stream.write_all(b"\r\n");
+    let _ = stream.write_all(body);
     finish_response(stream);
 }
 
 fn finish_response(stream: &mut TcpStream) {
-    stream.flush().expect("flush local E2E response");
-    stream
-        .shutdown(Shutdown::Write)
-        .expect("finish local E2E response");
+    let _ = stream.flush();
+    // Keep the socket alive briefly after the complete response. Otherwise a
+    // loopback FIN can race Cronet's final read or redirect callback on some
+    // platforms and mask the binding-level result with a socket error.
+    thread::sleep(Duration::from_millis(50));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_request_target;
+
+    #[test]
+    fn accepts_origin_and_proxy_absolute_request_targets() {
+        assert_eq!(normalize_request_target("/redirect307"), "/redirect307");
+        assert_eq!(
+            normalize_request_target("http://127.0.0.1:8080/redirect307?one=two"),
+            "/redirect307?one=two"
+        );
+        assert_eq!(normalize_request_target("https://example.com"), "/");
+    }
 }

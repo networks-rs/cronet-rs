@@ -11,14 +11,18 @@ repository.workspace = true
 bytes = "1"
 cronet-sys = { path = "../cronet-sys", version = "0.1.0", default-features = false }
 futures-core = "0.3"
+hickory-resolver = { version = "0.25.2", default-features = false, features = ["system-config", "tokio"], optional = true }
 serde_json = "1"
-tokio = { version = "1.44", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.44", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
 brotli = "8.0.4"
 
 [features]
-default = []
+default = ["dns"]
+# Tokio-native DNS queries backed by Hickory. This is an application-side
+# resolver and does not replace Chromium's resolver inside Cronet.
+dns = ["dep:hickory-resolver"]
 # Shared linking is the default. This additive override propagates through the
 # safe crate and selects the complete static native archive.
 static = ["cronet-sys/static"]

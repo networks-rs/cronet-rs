@@ -254,6 +254,49 @@ because the application must forward the process `JavaVM*` from `JNI_OnLoad`.
 The engine must be built inside a Tokio runtime; it is cloneable, `Send + Sync`,
 and can be shared by normal Tokio tasks.
 
+### Rust-native DNS
+
+The default `dns` feature provides a cloneable Tokio resolver backed by
+Hickory. It supports the host DNS configuration, explicit upstream servers,
+IPv4/IPv6 and reverse lookups, and generic typed queries for every record type
+supported by Hickory:
+
+```rust,no_run
+use cronet::dns::{DnsResolver, RData, RecordType};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dns = DnsResolver::from_system()?;
+
+    for address in dns.lookup_ip("example.com.").await?.iter() {
+        println!("{address}");
+    }
+
+    let txt = dns.lookup("example.com.", RecordType::TXT).await?;
+    for record in txt.iter() {
+        if let RData::TXT(value) = record {
+            println!("{:?}", value.txt_data());
+        }
+    }
+    Ok(())
+}
+```
+
+This resolver is an application-side facility for explicit queries,
+prewarming, diagnostics, and policy. Cronet's public C API has no safe custom
+host-resolver injection point, so resolving a hostname with `DnsResolver` does
+not force a later `Engine` request to use those addresses. Cronet requests
+continue to use Chromium's internal host resolver.
+
+There is likewise no OpenSSL crate dependency to replace. The pinned Cronet
+native implementation uses Chromium's BoringSSL internally for HTTPS and
+QUIC, and its C API has no TLS-provider injection point. Adding rustls to the
+safe crate would therefore create a second, unused TLS stack rather than
+replace Cronet's transport security. The exact boundary and configuration
+guidance are documented in [the DNS integration guide](docs/dns.md). Disable
+the application-side resolver with `default-features = false` if it is not
+needed.
+
 `Engine::send` resolves when response headers arrive and returns a bounded
 `ResponseBody`. The body implements both
 `Stream<Item = cronet::Result<bytes::Bytes>>` and Tokio `AsyncRead`. Cronet does
@@ -358,6 +401,7 @@ Without building Chromium, the API and generated bindings can be verified with:
 cargo xtask sync --api-only
 CRONET_SYS_NO_LINK=1 cargo fmt --all -- --check
 CRONET_SYS_NO_LINK=1 cargo clippy --workspace --all-targets -- -D warnings
+cargo test -p cronet --test dns_e2e
 CRONET_SYS_NO_LINK=1 cargo check --workspace --all-targets
 cargo xtask audit-e2e
 ```

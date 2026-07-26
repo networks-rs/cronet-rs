@@ -1061,6 +1061,9 @@ impl TestServer {
             while !worker_stopping.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("make accepted portable E2E socket blocking");
                         thread::spawn(move || handle_connection(stream));
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
