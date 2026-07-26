@@ -1,223 +1,81 @@
 # cronet-rs
 
-Safe Rust bindings for Chromium's native Cronet C API. The repository is a
-standard Cargo workspace:
+Safe, source-built Rust bindings for Chromium's native Cronet C API, with a
+Tokio-native streaming interface.
 
-```text
-crates/cronet-sys  generated raw FFI bindings
-crates/cronet      safe, Tokio-native streaming Rust API
-xtask              `cronet-src` package plus source/build CLI
-```
+`cronet-rs` ships no prebuilt native libraries. `cronet-sys` generates its raw
+bindings from the pinned upstream headers and builds Cronet from source for the
+current Cargo target. Shared linking is the default; the additive `static`
+feature builds a complete static archive.
 
-`cronet-sys` does not contain copied or hand-maintained Rust declarations. Its
-build script uses `cronet-src` to materialize the pinned source tree, runs
-bindgen directly against that tree's upstream headers, and builds Cronet
-locally. The project neither publishes nor downloads prebuilt native libraries.
+> **Upstream status:** Chromium removed `//components/cronet/native` on
+> 2026-01-13 because the C API was never officially supported. This workspace
+> is pinned to Chromium 146.0.7633.0 at
+> `db64a84f93f16f8de53fee8d33df0a31473efefb`, the parent of the deletion
+> commit. Moving to current Chromium requires restoring or replacing that API.
 
-## Upstream compatibility
+## What is included
 
-Chromium deleted `//components/cronet/native` on 2026-01-13 because that C API
-was never officially supported. This workspace is therefore pinned to
-`db64a84f93f16f8de53fee8d33df0a31473efefb`, the parent of the deletion commit
-(Chromium 146.0.7633.0). Updating to current Chromium `main` is not possible
-without first restoring or replacing the removed native API.
+- Generated, version-locked raw C and bidirectional-stream bindings.
+- Safe `Engine`, request, response, upload, redirect, metrics, NetLog, cache,
+  QUIC hint, public-key pinning, and shutdown APIs.
+- Bounded response streams implementing both Tokio `AsyncRead` and
+  `Stream<Item = Result<Bytes>>`, with native backpressure.
+- Tokio `AsyncRead` uploads, rewindable `AsyncRead + AsyncSeek` uploads, and
+  HTTP/2 or HTTP/3 bidirectional streams implementing `AsyncRead + AsyncWrite`.
+- Tokio-friendly cancellation, redirect decisions, request status, finished
+  request subscriptions, and asynchronous shutdown.
+- Optional Rust-native DNS queries backed by Hickory.
+- Source builds for Linux, macOS, Windows, Android, iOS, and OpenHarmony.
 
-## Source synchronization
+The complete safe API audit and its E2E scenario mapping live in the
+[capability matrix](docs/capability-matrix.md).
 
-Install Git, then run:
+## Quick start
 
-```sh
-cargo xtask sync
-```
-
-The sync is intentionally not a normal Chromium checkout. It uses a shallow,
-blobless Git partial clone plus a sparse allow-list derived from Cronet's own
-`components/cronet/android/dependencies.txt`. Chrome, Blink, Content, V8,
-WebRTC, unrelated product sources, and Chromium's GCS-hosted browser/test assets
-are not checked out. Before invoking `gclient`, `xtask` derives a filtered
-`DEPS.cronet` from the pinned Chromium `DEPS`; this applies the Cronet allow-list
-equally to Git, CIPD, and GCS dependencies. `gclient` still downloads the
-third-party repositories and toolchains that the Cronet target actually needs;
-a source build cannot consist of `components/cronet` alone because Cronet
-depends on Chromium `base`, `net`, BoringSSL, QUICHE, and other libraries.
-At the pinned revision this selects 74 of Chromium's 421 dependency entries
-before the host and target conditions narrow the set further.
-
-To download only the C headers for binding generation and IDE checks:
-
-```sh
-cargo xtask sync --api-only
-CRONET_SYS_NO_LINK=1 cargo check --workspace
-```
-
-The default checkout lives under `.cronet/` and is ignored by Git. Pass
-`--source-dir PATH` to `sync`, `build`, `doctor`, and `print-env`, or set
-`CRONET_SOURCE_DIR`.
-
-## Source crate and automatic native build
-
-For an ordinary application build, no manual `xtask` step is required:
-
-```sh
-cargo build --release                    # shared Cronet (default)
-cargo build --release --features static  # complete static Cronet archive
-```
-
-`static` is a single additive override instead of a mutually exclusive pair of
-`dynamic`/`static` features, so Cargo feature unification remains deterministic.
-The safe crate propagates it to `cronet-sys`. Without it, shared linking is
-selected.
-
-`cronet-src::Build`, modeled after `openssl-src`, resolves source in this order:
-
-1. an explicit `CRONET_SOURCE_DIR`;
-2. `vendor/chromium/src` inside a fully vendored `cronet-src` distribution;
-3. a persistent target-specific source cache populated from the pinned
-   Chromium revision and filtered `DEPS.cronet`.
-
-The third path is still a source build: it downloads no native library and
-does not check out Chrome, Blink, V8, WebRTC, or browser assets. The cache is
-`$CARGO_HOME/cronet-rs/source` by default; `CRONET_CACHE_DIR` overrides it.
-
-The source-build workflow verifies these native targets:
-
-| Platform | Architectures | Rust targets |
-| --- | --- | --- |
-| Linux | x86-64, ARM64 | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` |
-| macOS | x86-64, Apple Silicon | `x86_64-apple-darwin`, `aarch64-apple-darwin` |
-| Android | x86, x86-64, ARMv7, ARM64 | `i686-linux-android`, `x86_64-linux-android`, `armv7-linux-androideabi`, `aarch64-linux-android` |
-| iOS | x86-64 Simulator, ARM64 Simulator/device | `x86_64-apple-ios`, `aarch64-apple-ios-sim`, `aarch64-apple-ios` |
-| Windows | x86-64, ARM64 | `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` |
-| OpenHarmony | ARMv7, ARM64, x86-64 | `armv7-unknown-linux-ohos`, `aarch64-unknown-linux-ohos`, `x86_64-unknown-linux-ohos` |
-
-OpenHarmony builds use the same source builder and do not depend on a DevEco
-Studio installation layout. Install the corresponding Rust standard library,
-then provide any complete OpenHarmony Native SDK root either through
-`Build::ohos_sdk_native`, `OHOS_SDK_NATIVE`, or `OHOS_NDK_HOME`:
-
-```sh
-rustup target add aarch64-unknown-linux-ohos
-OHOS_SDK_NATIVE=/path/to/openharmony/native \
-  cargo xtask build --release --linkage both \
-    --target aarch64-unknown-linux-ohos
-```
-
-The builder discovers the selected SDK's sysroot, Clang resource directory,
-compiler builtins, and unwind archive from their target triples. It does not
-scan host-specific IDE directories or invoke the SDK compiler. Chromium's
-pinned Clang, LLD, libc++, and libc++abi build the source; the supplied SDK
-provides only the target OS headers and ABI runtime archives.
-
-The application-level QEMU/device harness is documented in
-[`tests/ohos-e2e`](tests/ohos-e2e/README.md). Its SDK, HDC, Hvigor, signer,
-device, and source/output locations are all injected; the repository contains
-no emulator image or host installation path.
-
-Android source builds discover a standard NDK through `ANDROID_NDK_HOME`,
-`ANDROID_NDK_ROOT`, or `NDK_HOME` and default to API 23. The generated output
-contains the C library plus the minimal Java support JAR and pre-dexed JAR
-needed by Chromium's Android proxy, certificate, and network-change bridges.
-Static consumers initialize Cronet's Java VM from their final `JNI_OnLoad` via
-`cronet::android::initialize_java_vm`; the repository's application harness
-shows the complete packaging path.
-
-iOS source builds require macOS and Xcode. They support the ARM64 device target
-and both Rust Simulator targets, use relocatable `@rpath` install names for the
-shared library, and propagate every required Apple framework for static mode.
-Chromium 146 defaults to iOS 17 for this non-Blink build; override it through
-`IPHONEOS_DEPLOYMENT_TARGET` or `cronet_src::Build::ios_deployment_target`.
-Dynamic and static Android/iOS application tests are documented in
-[`tests/mobile-e2e`](tests/mobile-e2e/README.md).
-
-The complete filtered source closure is approximately 3.7 GiB unpacked. A
-normal crates.io package cannot embed it because crates.io limits a `.crate`
-archive to 10 MiB. Therefore `cronet-src` is intentionally ready to be split
-into a dedicated source repository: that repository can ship
-`vendor/chromium/src` for offline builds, while the small crates.io edition
-contains the identical revision lock, filter, and build logic and materializes
-the source cache on first use. A private Cargo registry with a sufficiently
-large package limit can publish the fully vendored edition directly.
-
-To prepare that fully offline source edition after synchronization:
-
-```sh
-cargo xtask vendor-source
-cargo package -p cronet-src --allow-dirty --no-verify
-```
-
-`vendor-source` copies the buildable filtered closure into
-`xtask/vendor/chromium/src`, preserving source/toolchain symlinks while
-excluding Git metadata, native output directories, and Python cache files. The
-`cronet-src` package manifest already includes `vendor/**`.
-
-The `xtask` directory is a self-contained `cronet-src` package and is the split
-boundary for a dedicated large-source repository. Until that repository has a
-stable URL, an offline consumer can use a local checkout without changing
-`cronet-sys`:
+The minimum supported Rust version is 1.85. Shared linking and Rust-native DNS
+are enabled by default:
 
 ```toml
-[patch.crates-io]
-cronet-src = { path = "../cronet-src" }
+[dependencies]
+cronet = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-After publishing the source repository, the patch can use its pinned `git` and
-`rev` instead. The normal crates.io `cronet-src` version remains the online
-source-materialization implementation with the same API and revision lock.
+To build Cronet as a static library, select the dependency feature instead:
 
-Applications using the default shared mode must still ship the locally built
-shared library beside the program or otherwise make its output directory
-visible through `PATH`, `LD_LIBRARY_PATH`, or `DYLD_LIBRARY_PATH`, as
-appropriate for the platform. Static mode has no Cronet runtime-library
-deployment step.
-Chromium 146 targets macOS 12 or newer; set `MACOSX_DEPLOYMENT_TARGET=12.0`
-when statically linking a macOS application.
+```toml
+[dependencies]
+cronet = { version = "0.1", features = ["static"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
 
-## Manual source building
+| Feature | Default | Effect |
+| --- | --- | --- |
+| `dns` | yes | Adds the application-side Tokio/Hickory resolver |
+| `static` | no | Builds and links the complete static Cronet archive |
 
-The full sync installs `depot_tools`, but deliberately does not run Chromium's
-browser-wide hooks. Build both native forms directly from source with:
+`static` is an additive override rather than a `dynamic`/`static` feature pair,
+so Cargo feature unification has one deterministic result.
+
+The first build materializes the pinned, filtered Chromium source tree and
+compiles Cronet locally:
 
 ```sh
-cargo xtask build --release --linkage both
-eval "$(cargo xtask print-env)" # macOS/Linux: link and runtime library paths
 cargo build --release
-cargo build --release --features static
-cargo run --release -p cronet --features native-example --example get
 ```
 
-On Windows, run the `set ...` lines printed by `cargo xtask print-env` in
-`cmd.exe`. Applications must ship the resulting Cronet shared library and make
-it visible to the platform dynamic loader; `CRONET_LIB_DIR` only controls the
-Rust link step.
+The filtered source closure is approximately 3.7 GiB unpacked, so the initial
+build is intentionally much heavier than a normal Rust crate build. Later
+builds reuse the target-specific cache under `$CARGO_HOME/cronet-rs/source`.
+Set `CRONET_CACHE_DIR` to move that cache.
 
-Additional GN arguments can be repeated, for example:
+Applications using shared mode must deploy the generated Cronet shared library
+and make it visible to the platform loader through `PATH`,
+`LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, or the platform's normal packaging
+mechanism. Static mode has no Cronet runtime-library deployment step.
 
-```sh
-cargo xtask build --release --linkage dynamic --target x86_64-apple-darwin
-cargo xtask build --release --linkage static --target x86_64-apple-darwin
-cargo xtask build --release --gn-arg 'target_cpu="x64"'
-```
-
-`cronet-sys/build.rs` uses these locations by default:
-
-- source: `.cronet/chromium/src`
-- native library: `.cronet/chromium/src/out/cronet-rs`
-
-Override them with `CRONET_SOURCE_DIR` and `CRONET_LIB_DIR`. The latter is an
-explicit system/library-development escape hatch and never triggers a binary
-download. Run `cargo xtask doctor` to inspect the local setup.
-`CRONET_SYS_NO_LINK=1` is only for binding checks and docs that do not link the
-safe crate, and still requires a synced header tree.
-
-Chromium's normal root GN graph imports browser-only ANGLE, V8, and test
-targets even when the requested target is Cronet. `xtask` therefore generates
-an ignored GN overlay containing the same sparse sources, a Cronet-only root
-target, and test-target-free BUILD files. It also applies one isolated
-compatibility change to the final upstream native stub: initialize
-`base::CommandLine` before the newer certificate verifier reads it. The pinned
-upstream checkout itself is never modified.
-
-## Safe API
+### Make a request
 
 ```rust,no_run
 use cronet::{Engine, Request};
@@ -246,20 +104,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The safe layer owns the engine, Tokio executor, callback contexts, requests,
-upload providers, listeners, and reusable Cronet buffers. Its networking API
-does not expose raw pointers or unsafe operations. The sole platform boundary
-is static Android embedding: `cronet::android::initialize_java_vm` is unsafe
-because the application must forward the process `JavaVM*` from `JNI_OnLoad`.
-The engine must be built inside a Tokio runtime; it is cloneable, `Send + Sync`,
-and can be shared by normal Tokio tasks.
+Build an engine inside a Tokio runtime. `Engine` is cloneable, `Send + Sync`,
+and may be shared by ordinary Tokio tasks. `Engine::send` resolves when response
+headers arrive; `Engine::execute` is the convenience API that collects the same
+bounded stream into a buffered response.
 
-### Rust-native DNS
+Dropping a pending request or response body cancels its native request. A
+request handle also supports explicit cancellation from `tokio::select!` or
+another task:
+
+```rust,no_run
+use cronet::{Engine, Request};
+use std::time::Duration;
+
+async fn selectable(engine: &Engine) -> cronet::Result<()> {
+    let request = Request::builder("https://example.com/slow")?.build()?;
+    let pending = engine.start(request)?;
+    let handle = pending.handle();
+
+    let response = tokio::select! {
+        response = pending => response?,
+        () = tokio::time::sleep(Duration::from_secs(10)) => {
+            handle.cancel();
+            return Err(cronet::Error::Canceled);
+        }
+    };
+    drop(response);
+    Ok(())
+}
+```
+
+### Streaming and bidirectional I/O
+
+Response bodies are bounded: Cronet receives its next native `Read` call only
+after the current chunk enters the channel, so slow consumers apply real
+backpressure. Uploads accept `Bytes`, Tokio `AsyncRead`, or rewindable
+`AsyncRead + AsyncSeek` sources.
+
+The upstream gRPC-support C API is exposed as a bounded HTTP/2 or HTTP/3 stream:
+
+```rust,no_run
+use cronet::{BidirectionalRequest, Engine};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+async fn rpc(engine: &Engine) -> Result<(), Box<dyn std::error::Error>> {
+    let request = BidirectionalRequest::builder("https://example.com.Service/Call")?
+        .header("content-type", "application/grpc")?
+        .disable_auto_flush(true)
+        .build()?;
+    let mut stream = engine.open_bidirectional(request).await?;
+
+    stream.write_all(b"framed request").await?;
+    stream.shutdown().await?;
+    let headers = stream.response_headers().await?;
+    let mut body = Vec::new();
+    stream.read_to_end(&mut body).await?;
+    let trailers = stream.trailers().await?;
+    println!(
+        "{} headers, {} body bytes, {} trailers",
+        headers.headers.len(),
+        body.len(),
+        trailers.len()
+    );
+    Ok(())
+}
+```
+
+`BidirectionalStream` implements Tokio `AsyncRead + AsyncWrite` and
+`Stream`. It also exposes response headers, trailers, explicit flush,
+half-close, cancellation, and terminal errors.
+
+## DNS and TLS boundary
 
 The default `dns` feature provides a cloneable Tokio resolver backed by
-Hickory. It supports the host DNS configuration, explicit upstream servers,
-IPv4/IPv6 and reverse lookups, and generic typed queries for every record type
-supported by Hickory:
+Hickory. It supports system configuration, explicit upstream servers,
+IPv4/IPv6 lookup, reverse lookup, and typed queries for Hickory record types:
 
 ```rust,no_run
 use cronet::dns::{DnsResolver, RData, RecordType};
@@ -272,8 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{address}");
     }
 
-    let txt = dns.lookup("example.com.", RecordType::TXT).await?;
-    for record in txt.iter() {
+    for record in dns.lookup("example.com.", RecordType::TXT).await?.iter() {
         if let RData::TXT(value) = record {
             println!("{:?}", value.txt_data());
         }
@@ -282,132 +200,207 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-This resolver is an application-side facility for explicit queries,
-prewarming, diagnostics, and policy. Cronet's public C API has no safe custom
-host-resolver injection point, so resolving a hostname with `DnsResolver` does
-not force a later `Engine` request to use those addresses. Cronet requests
-continue to use Chromium's internal host resolver.
+This is an application-side resolver for explicit queries, prewarming,
+diagnostics, and policy. Cronet's C API has no safe custom-resolver injection
+point, so `Engine` requests continue to use Chromium's internal host resolver.
+Disable the helper when it is not needed:
 
-There is likewise no OpenSSL crate dependency to replace. The pinned Cronet
-native implementation uses Chromium's BoringSSL internally for HTTPS and
-QUIC, and its C API has no TLS-provider injection point. Adding rustls to the
-safe crate would therefore create a second, unused TLS stack rather than
-replace Cronet's transport security. The exact boundary and configuration
-guidance are documented in [the DNS integration guide](docs/dns.md). Disable
-the application-side resolver with `default-features = false` if it is not
-needed.
-
-`Engine::send` resolves when response headers arrive and returns a bounded
-`ResponseBody`. The body implements both
-`Stream<Item = cronet::Result<bytes::Bytes>>` and Tokio `AsyncRead`. Cronet does
-not receive its next native `Read` call until a chunk has entered the bounded
-channel, so a slow consumer applies real backpressure instead of allowing an
-unbounded buffer. Dropping the send future or body cancels the request.
-`Engine::execute` is the convenience path that asynchronously collects the
-same stream into a buffered `Response`.
-
-Uploads accept `Bytes`, arbitrary Tokio `AsyncRead` sources, or rewindable
-`AsyncRead + AsyncSeek` sources. Request status, redirect control, cache policy,
-priority, idempotency, annotations, body-size limits, final timing/traffic
-metrics, engine-wide finished-request subscriptions, `NetLog`, public-key pins,
-QUIC hints, HTTP/2, QUIC, and Brotli configuration are exposed. Async shutdown
-cancels active work, waits for terminal and metrics callbacks, and performs the
-blocking native shutdown away from Tokio worker threads.
-
-For cancellation and status before headers arrive, start the request without
-awaiting it immediately. `PendingRequest` is a normal Tokio future, and its
-cloneable handle can be moved into other tasks:
-
-```rust,no_run
-# use cronet::{Engine, Request};
-# use std::time::Duration;
-# async fn selectable(engine: &Engine) -> cronet::Result<()> {
-let request = Request::builder("https://example.com/slow")?.build()?;
-let pending = engine.start(request)?;
-let handle = pending.handle();
-
-let response = tokio::select! {
-    response = pending => response?,
-    () = tokio::time::sleep(Duration::from_secs(10)) => {
-        handle.cancel();
-        return Err(cronet::Error::Canceled);
-    }
-};
-# drop(response);
-# Ok(())
-# }
+```toml
+cronet = { version = "0.1", default-features = false }
 ```
 
-Redirects can be followed, rejected with owned redirect response metadata, or
-decided by a non-blocking Tokio future through `redirect_handler`.
+There is no OpenSSL dependency to replace. Cronet uses Chromium's BoringSSL
+internally for HTTPS and QUIC, and the C API has no TLS-provider injection
+point. Adding rustls to the safe crate would create a second, unused TLS stack.
+See the [DNS integration guide](docs/dns.md) for the exact boundary.
 
-The production API audit and its exact test mapping are recorded in
-[the capability matrix](docs/capability-matrix.md).
+## Workspace architecture
 
-The upstream gRPC-support C header is generated by `cronet-sys` from the same
-pinned source tree. `Engine::open_bidirectional` wraps its HTTP/2/QUIC
-stream as a bounded Tokio `AsyncRead + AsyncWrite + Stream`, including response
-headers, trailers, explicit flush, half-close, cancellation, and terminal
-errors:
+This repository is a standard Cargo workspace:
 
-```rust,no_run
-# use cronet::{BidirectionalRequest, Engine};
-# use tokio::io::{AsyncReadExt, AsyncWriteExt};
-# async fn rpc(engine: &Engine) -> Result<(), Box<dyn std::error::Error>> {
-let request = BidirectionalRequest::builder("https://example.com.Service/Call")?
-    .header("content-type", "application/grpc")?
-    .disable_auto_flush(true)
-    .build()?;
-let mut stream = engine.open_bidirectional(request).await?;
-
-stream.write_all(b"framed request").await?;
-stream.shutdown().await?;
-let response = stream.response_headers().await?;
-let mut body = Vec::new();
-stream.read_to_end(&mut body).await?;
-let trailers = stream.trailers().await?;
-# let _ = (response, trailers);
-# Ok(())
-# }
+```text
+crates/cronet-sys  generated raw FFI bindings and Cargo build integration
+crates/cronet      safe Tokio API
+xtask              cronet-src package and source/build CLI
 ```
 
-For a streaming upload:
+`cronet-sys` contains no copied or hand-maintained FFI declarations. Its build
+script asks `cronet-src` to locate or materialize the pinned source tree, runs
+bindgen against the upstream headers, and builds the selected native linkage.
+The safe crate owns the engine, executor, callback contexts, requests, upload
+providers, listeners, and reusable Cronet buffers.
 
-```rust,no_run
-# use cronet::{Engine, Request};
-# async fn upload(engine: &Engine) -> cronet::Result<()> {
-let (mut writer, reader) = tokio::io::duplex(64 * 1024);
-tokio::spawn(async move {
-    use tokio::io::AsyncWriteExt;
-    writer.write_all(b"streamed body").await.unwrap();
-});
+The networking API exposes no raw pointers or unsafe operations. The sole
+platform boundary is static Android embedding:
+`cronet::android::initialize_java_vm` is unsafe because the application must
+forward the process `JavaVM*` received by `JNI_OnLoad`.
 
-let request = Request::builder("https://example.com/upload")?
-    .method("POST")?
-    .header("content-type", "application/octet-stream")?
-    .body_stream(reader, Some(13))
-    .build()?;
-let response = engine.execute(request).await?;
-# let _ = response;
-# Ok(())
-# }
+## Supported native targets
+
+| Platform | Architectures | Rust targets |
+| --- | --- | --- |
+| Linux | x86-64, ARM64 | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` |
+| macOS | x86-64, Apple Silicon | `x86_64-apple-darwin`, `aarch64-apple-darwin` |
+| Windows | x86-64, ARM64 | `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` |
+| Android | x86, x86-64, ARMv7, ARM64 | `i686-linux-android`, `x86_64-linux-android`, `armv7-linux-androideabi`, `aarch64-linux-android` |
+| iOS | x86-64 Simulator, ARM64 Simulator/device | `x86_64-apple-ios`, `aarch64-apple-ios-sim`, `aarch64-apple-ios` |
+| OpenHarmony | ARMv7, ARM64, x86-64 | `armv7-unknown-linux-ohos`, `aarch64-unknown-linux-ohos`, `x86_64-unknown-linux-ohos` |
+
+Desktop targets run on architecture-matched CI hosts, avoiding accidental
+cross-compilation of Chromium's host tools. Android and OpenHarmony use their
+target SDK/NDK; iOS builds require macOS and Xcode.
+
+## Source-build model
+
+`cronet-src::Build` follows the same role as `openssl-src`. It resolves source
+in this order:
+
+1. `CRONET_SOURCE_DIR`, when explicitly configured;
+2. `vendor/chromium/src` in a fully vendored `cronet-src` distribution;
+3. a persistent target-specific cache materialized from the locked revision.
+
+The third path downloads source and required build tools, never a native Cronet
+binary. The sync is not a full Chromium checkout: it uses a shallow, blobless
+partial clone, a sparse allow-list derived from
+`components/cronet/android/dependencies.txt`, and a filtered `DEPS.cronet`.
+Chrome, Blink, Content, V8, WebRTC, unrelated product code, and browser/test
+assets are excluded. The pinned revision selects 74 of 421 top-level Chromium
+dependency entries before host and target conditions narrow the set further.
+
+Cronet still requires Chromium `base`, `net`, BoringSSL, QUICHE, libc++, and
+their build toolchains, so a buildable source tree cannot consist of
+`components/cronet` alone.
+
+### Repository development
+
+Synchronize the filtered source tree under the repository's ignored
+`.cronet/` directory:
+
+```sh
+cargo xtask sync
+```
+
+To fetch only the public C headers for binding generation and IDE checks:
+
+```sh
+cargo xtask sync --api-only
+CRONET_SYS_NO_LINK=1 cargo check --workspace
+```
+
+Build both native forms and expose their paths to subsequent Cargo commands:
+
+```sh
+cargo xtask build --release --linkage both
+eval "$(cargo xtask print-env)" # macOS/Linux
+cargo build -p cronet --release
+cargo build -p cronet --release --features static
+cargo run --release -p cronet --features native-example --example get
+```
+
+On Windows, apply the `set ...` lines emitted by `cargo xtask print-env` in
+`cmd.exe`. Use `cargo xtask doctor` to inspect the local configuration.
+
+Common overrides are:
+
+| Variable | Purpose |
+| --- | --- |
+| `CRONET_SOURCE_DIR` | Use an existing Chromium source root |
+| `CRONET_CACHE_DIR` | Move the persistent source cache |
+| `CRONET_LIB_DIR` | Link an explicitly supplied local build output |
+| `CRONET_SYS_NO_LINK=1` | Generate/check bindings without a native link |
+| `ANDROID_NDK_HOME` | Select a standard Android NDK |
+| `ANDROID_API_LEVEL` | Override Android API 23 |
+| `OHOS_SDK_NATIVE` | Select an OpenHarmony Native SDK |
+| `IPHONEOS_DEPLOYMENT_TARGET` | Override the default iOS 17 target |
+| `MACOSX_DEPLOYMENT_TARGET` | Set the macOS deployment target |
+
+`CRONET_LIB_DIR` is a local development escape hatch and never initiates a
+binary download. `CRONET_SYS_NO_LINK=1` still requires a synchronized header
+tree and is intended only for checks and documentation.
+
+Additional GN arguments and explicit targets are available through `xtask`:
+
+```sh
+cargo xtask build --release --linkage dynamic --target x86_64-apple-darwin
+cargo xtask build --release --linkage static --target x86_64-apple-darwin
+cargo xtask build --release --gn-arg 'target_cpu="x64"'
+```
+
+The builder creates an ignored Cronet-only GN overlay because Chromium's normal
+root graph imports browser-only targets even when only Cronet is requested. It
+also applies isolated compatibility patches without modifying the pinned
+upstream checkout.
+
+### Platform notes
+
+**Android:** set `ANDROID_NDK_HOME`, `ANDROID_NDK_ROOT`, or `NDK_HOME`.
+The default API level is 23. Build output includes the native library, minimal
+Java support JAR, and pre-dexed JAR used by Chromium's proxy, certificate, and
+network-change bridges. Static applications must forward `JNI_OnLoad` to
+`cronet::android::initialize_java_vm`.
+
+**iOS:** build on macOS with Xcode. ARM64 device and both Rust Simulator
+targets are supported. Shared libraries use relocatable `@rpath` install names;
+static mode propagates the required Apple frameworks. Chromium 146 defaults to
+iOS 17. See the [mobile E2E harness](tests/mobile-e2e/README.md).
+
+**OpenHarmony:** install the target Rust standard library and provide a complete
+Native SDK through `OHOS_SDK_NATIVE` or `OHOS_NDK_HOME`:
+
+```sh
+rustup target add aarch64-unknown-linux-ohos
+OHOS_SDK_NATIVE=/path/to/openharmony/native \
+  cargo xtask build --release --linkage both \
+    --target aarch64-unknown-linux-ohos
+```
+
+The builder discovers the SDK sysroot and ABI runtime from target triples; it
+does not depend on a DevEco Studio installation layout. The injectable
+QEMU/device harness is documented under
+[`tests/ohos-e2e`](tests/ohos-e2e/README.md).
+
+**macOS:** Chromium 146 targets macOS 12 or newer. Set
+`MACOSX_DEPLOYMENT_TARGET=12.0` when statically linking an application.
+
+### Offline source delivery
+
+Crates.io limits a `.crate` archive to 10 MiB, so it cannot contain the
+approximately 3.7 GiB filtered source closure. The small `cronet-src` crate
+therefore carries the revision lock, filter, patches, and build logic, then
+materializes source on first use.
+
+For a private registry or dedicated large-source repository, prepare the
+fully vendored package with:
+
+```sh
+cargo xtask vendor-source
+cargo package -p cronet-src --allow-dirty --no-verify
+```
+
+`vendor-source` writes `xtask/vendor/chromium/src`, preserving required
+symlinks while excluding Git metadata, output directories, and Python caches.
+Consumers can redirect `cronet-src` without changing `cronet-sys`:
+
+```toml
+[patch.crates-io]
+cronet-src = { path = "../cronet-src" }
 ```
 
 ## Verification
 
-Without building Chromium, the API and generated bindings can be verified with:
+Run the source-independent checks after an API-only sync:
 
 ```sh
 cargo xtask sync --api-only
 CRONET_SYS_NO_LINK=1 cargo fmt --all -- --check
 CRONET_SYS_NO_LINK=1 cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p cronet --test dns_e2e
+CRONET_SYS_NO_LINK=1 cargo test -p cronet --test dns_e2e
 CRONET_SYS_NO_LINK=1 cargo check --workspace --all-targets
 cargo xtask audit-e2e
 ```
 
-After a native build, both real link modes and the full safe API can be
-exercised with:
+After building the native library, exercise shared and static linking plus the
+local and public-network scenarios:
 
 ```sh
 eval "$(cargo xtask print-env)"
@@ -416,17 +409,13 @@ cargo test -p cronet --features native-tests --test e2e_local -- --test-threads=
 cargo test -p cronet --features static,native-tests --test native_smoke
 cargo test -p cronet --features static,native-tests --test e2e_local -- --test-threads=1
 cargo test -p cronet --features network-tests --test e2e_network -- --test-threads=1
-cargo run -p cronet --features native-example --example get
 ```
 
-The API audit requires every public safe function to name a concrete runtime
-scenario. Desktop, Android, iOS, and OpenHarmony runners compile the shared
-[`portable_e2e.rs`](crates/cronet/tests/support/portable_e2e.rs) suite;
-cache/NetLog and public
-HTTP/2/HTTP/3 tests add the platform/protocol-specific cases. The full safety
-contract and scenario dimensions are documented in
+Desktop, Android, iOS, and OpenHarmony runners share
+[`portable_e2e.rs`](crates/cronet/tests/support/portable_e2e.rs). Cache/NetLog
+and public HTTP/2 or HTTP/3 cases add platform- and protocol-specific coverage.
+The complete safety contract is documented in
 [`docs/e2e-safety.md`](docs/e2e-safety.md).
 
-Set `CRONET_E2E_REQUIRE_QUIC=1` when the test network permits UDP/443 and QUIC
-fallback must fail the build. The source-build workflow uses this strict mode
-on Linux x86-64.
+Set `CRONET_E2E_REQUIRE_QUIC=1` when UDP/443 is available and QUIC fallback
+must fail the test. Linux x86-64 CI uses this strict mode.
