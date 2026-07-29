@@ -14,6 +14,11 @@ complete source tree, and compiles Cronet. Source selection is:
 No prebuilt Cronet library is downloaded or accepted. `CRONET_CACHE_DIR`
 changes the persistent source cache location.
 
+Materialization and native builds take a cross-process lock per target cache.
+The first full synchronization initializes depot_tools' gsutil package before
+gclient starts parallel downloads, avoiding first-use lock races during Cargo
+package verification and concurrent builds.
+
 Chromium 146 does not publish its pinned Linux compiler or Rust host tools for
 ARM64. A native `aarch64-unknown-linux-gnu` build therefore uses an installed
 LLVM 22 toolchain selected with `Build::clang_dir` or `CRONET_CLANG_DIR`, the

@@ -271,6 +271,12 @@ Cronet still requires Chromium `base`, `net`, BoringSSL, QUICHE, libc++, and
 their build toolchains, so a buildable source tree cannot consist of
 `components/cronet` alone.
 
+Source materialization and native compilation are protected by a
+cross-process, target-cache lock. The first full sync also initializes
+`depot_tools` download helpers before `gclient` starts parallel work. This lets
+concurrent Cargo processes and package verification safely reuse one cache
+without racing Git, gsutil, GN, or Ninja state.
+
 ### Repository development
 
 Synchronize the filtered source tree under the repository's ignored
@@ -419,3 +425,19 @@ The complete safety contract is documented in
 
 Set `CRONET_E2E_REQUIRE_QUIC=1` when UDP/443 is available and QUIC fallback
 must fail the test. Linux x86-64 CI uses this strict mode.
+
+## Publishing
+
+The packages form a strict source-to-safe dependency chain. Publish each new
+version in this order, allowing the crates.io index to expose one package
+before publishing its dependent:
+
+```sh
+cargo publish -p tokio-cronet-src
+cargo publish -p tokio-cronet-sys
+cargo publish -p tokio-cronet
+```
+
+`tokio-cronet-sys` package verification intentionally performs a real native
+source build. Reusing `CRONET_CACHE_DIR` keeps this deterministic without
+downloading a prebuilt library.

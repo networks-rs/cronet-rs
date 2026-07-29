@@ -92,6 +92,17 @@ jobs:
           export LD_LIBRARY_PATH="$CRONET_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export CRONET_E2E_REQUIRE_QUIC=1
           cargo test -p tokio-cronet --features network-tests --test e2e_network -- --test-threads=1
+      - name: Verify publishable crate tarballs
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          export CRONET_SOURCE_DIR="$PWD/.cronet/chromium/src"
+          cargo package -p tokio-cronet-src --allow-dirty
+          cargo package -p tokio-cronet-sys --allow-dirty \
+            --config 'patch.crates-io.tokio-cronet-src.path="xtask"'
+          cargo package -p tokio-cronet --allow-dirty \
+            --config 'patch.crates-io.tokio-cronet-src.path="xtask"' \
+            --config 'patch.crates-io.tokio-cronet-sys.path="crates/tokio-cronet-sys"'
 
   android-source:
     name: Android ${{ matrix.target }} source build

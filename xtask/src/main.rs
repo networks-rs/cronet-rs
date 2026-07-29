@@ -1,3 +1,4 @@
+use fs2::FileExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
@@ -507,28 +508,25 @@ fn ensure_native_from_source_configured(
     linkage: NativeLinkage,
     platform: PlatformConfig<'_>,
 ) -> Result<PathBuf, String> {
+    let source = absolute_path(source)?;
+    let _source_lock = SourceOperationLock::acquire(&source)?;
     let header = source.join("components/cronet/native/include/cronet_c.h");
     let bidirectional_header =
         source.join("components/grpc_support/include/bidirectional_stream_c.h");
     if header.is_file()
         && bidirectional_header.is_file()
-        && native_library_exists(source, Some(target), linkage)
+        && native_library_exists(&source, Some(target), linkage)
     {
-        return Ok(native_output_dir(source, Some(target)));
+        return Ok(native_output_dir(&source, Some(target)));
     }
 
-    if !source_tree_buildable(source) {
-        sync(&[
-            "--source-dir".into(),
-            source.as_os_str().to_owned(),
-            "--target".into(),
-            target.into(),
-        ])?;
+    if !source_tree_buildable(&source) {
+        sync_source(&source, false, Some(target))?;
     }
-    build_native(
+    build_native_unlocked(
         BuildOptions {
             common: CommonOptions {
-                source_dir: source.to_owned(),
+                source_dir: source.clone(),
             },
             release: true,
             target: Some(target.to_owned()),
@@ -540,7 +538,7 @@ fn ensure_native_from_source_configured(
         },
         platform,
     )?;
-    Ok(native_output_dir(source, Some(target)))
+    Ok(native_output_dir(&source, Some(target)))
 }
 
 fn source_tree_buildable(source: &Path) -> bool {
@@ -566,30 +564,27 @@ pub fn native_target_supported(target: &str) -> bool {
 
 fn sync(args: &[std::ffi::OsString]) -> Result<(), String> {
     let options = SyncOptions::parse(args)?;
-    // Commands below change their working directory to the Chromium root.
-    // Resolve a caller-provided relative path first so tool entry points remain
-    // valid on every host, independent of where the cache is located.
-    let source = if options.source_dir.is_absolute() {
-        options.source_dir
-    } else {
-        env::current_dir()
-            .map_err(display_error("resolve the current directory"))?
-            .join(options.source_dir)
-    };
+    let source = absolute_path(&options.source_dir)?;
+    let _source_lock = SourceOperationLock::acquire(&source)?;
+    sync_source(&source, options.api_only, options.target.as_deref())
+}
+
+fn sync_source(source: &Path, api_only: bool, target: Option<&str>) -> Result<(), String> {
     let chromium_root = source
         .parent()
         .ok_or_else(|| "source directory needs a parent".to_owned())?;
     fs::create_dir_all(chromium_root).map_err(display_error("create Chromium directory"))?;
 
-    init_or_update_sparse_checkout(&source, options.api_only)?;
-    if options.api_only {
+    init_or_update_sparse_checkout(source, api_only)?;
+    if api_only {
         println!("Cronet C API synchronized at {}", source.display());
         return Ok(());
     }
 
-    let depot_tools = depot_tools_dir(&source)?;
+    let depot_tools = depot_tools_dir(source)?;
     clone_or_update_depot_tools(&depot_tools)?;
-    write_gclient(chromium_root, options.target.as_deref())?;
+    write_gclient(chromium_root, target)?;
+    initialize_depot_tools_gsutil(&depot_tools)?;
     let gclient = depot_tools.join(if cfg!(windows) {
         "gclient.bat"
     } else {
@@ -629,8 +624,10 @@ fn sync(args: &[std::ffi::OsString]) -> Result<(), String> {
 }
 
 fn build(args: &[std::ffi::OsString]) -> Result<(), String> {
-    let options = BuildOptions::parse(args)?;
-    build_native(options, PlatformConfig::default())
+    let mut options = BuildOptions::parse(args)?;
+    options.common.source_dir = absolute_path(&options.common.source_dir)?;
+    let _source_lock = SourceOperationLock::acquire(&options.common.source_dir)?;
+    build_native_unlocked(options, PlatformConfig::default())
 }
 
 fn common_gn_args(release: bool) -> Vec<String> {
@@ -656,7 +653,7 @@ fn common_gn_args(release: bool) -> Vec<String> {
 }
 
 #[allow(clippy::too_many_lines)] // Native GN configuration and packaging form one atomic build transaction.
-fn build_native(options: BuildOptions, config: PlatformConfig<'_>) -> Result<(), String> {
+fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> Result<(), String> {
     let source = options
         .common
         .source_dir
@@ -980,12 +977,11 @@ fn write_static_link_manifest(
 }
 
 fn vendor_source(args: &[std::ffi::OsString]) -> Result<(), String> {
-    let options = VendorOptions::parse(args)?;
+    let mut options = VendorOptions::parse(args)?;
+    options.source_dir = absolute_path(&options.source_dir)?;
+    let _source_lock = SourceOperationLock::acquire(&options.source_dir)?;
     if !source_tree_buildable(&options.source_dir) {
-        sync(&[
-            "--source-dir".into(),
-            options.source_dir.as_os_str().to_owned(),
-        ])?;
+        sync_source(&options.source_dir, false, None)?;
     }
     if options.output.exists() {
         return Err(format!(
@@ -2171,16 +2167,59 @@ fn default_source_dir() -> PathBuf {
 }
 
 fn depot_tools_dir(source: &Path) -> Result<PathBuf, String> {
-    source
-        .parent()
-        .and_then(Path::parent)
-        .map(|root| root.join("depot_tools"))
-        .ok_or_else(|| {
-            format!(
-                "source directory {} must use a ROOT/chromium/src layout",
-                source.display()
-            )
-        })
+    source_operation_root(source).map(|root| root.join("depot_tools"))
+}
+
+fn source_operation_root(source: &Path) -> Result<&Path, String> {
+    source.parent().and_then(Path::parent).ok_or_else(|| {
+        format!(
+            "source directory {} must use a ROOT/chromium/src layout",
+            source.display()
+        )
+    })
+}
+
+struct SourceOperationLock {
+    file: fs::File,
+}
+
+impl SourceOperationLock {
+    fn acquire(source: &Path) -> Result<Self, String> {
+        let root = source_operation_root(source)?;
+        fs::create_dir_all(root).map_err(display_error("create Cronet source cache root"))?;
+        let path = root.join(".tokio-cronet.lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(display_error("open Cronet source cache lock"))?;
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                println!(
+                    "==> wait for another Cronet source operation using {}",
+                    root.display()
+                );
+                FileExt::lock_exclusive(&file)
+                    .map_err(display_error("wait for Cronet source cache lock"))?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "could not lock Cronet source cache {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for SourceOperationLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 fn host_gn(source: &Path) -> PathBuf {
@@ -2303,6 +2342,23 @@ fn clone_or_update_depot_tools(path: &Path) -> Result<(), String> {
             .args(["clone", "--depth=1", "--filter=blob:none", DEPOT_TOOLS_URL])
             .arg(path),
         "clone depot_tools",
+    )
+}
+
+fn initialize_depot_tools_gsutil(depot_tools: &Path) -> Result<(), String> {
+    let gsutil = depot_tools.join("gsutil.py");
+    if !gsutil.is_file() {
+        return Err(format!(
+            "depot_tools gsutil launcher is missing at {}",
+            gsutil.display()
+        ));
+    }
+    run_command(
+        command_with_depot_tools(Path::new(host_python()), depot_tools)
+            .current_dir(depot_tools)
+            .arg(gsutil)
+            .arg("version"),
+        "initialize depot_tools gsutil before parallel dependency downloads",
     )
 }
 
@@ -4979,6 +5035,29 @@ after"#;
         assert!(lock.contains(&format!("chromium_revision={CHROMIUM_REVISION}")));
         assert!(lock.contains(&format!("chromium_version={CHROMIUM_VERSION}")));
         assert!(lock.contains("source_layout=vendor/chromium/src"));
+    }
+
+    #[test]
+    fn serializes_operations_on_one_source_cache() {
+        let root =
+            env::temp_dir().join(format!("tokio-cronet-src-lock-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("chromium/src");
+        let lock = SourceOperationLock::acquire(&source).unwrap();
+        let lock_path = root.join(".tokio-cronet.lock");
+        let competing = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+
+        assert!(FileExt::try_lock_exclusive(&competing).is_err());
+        drop(lock);
+        FileExt::try_lock_exclusive(&competing).unwrap();
+        FileExt::unlock(&competing).unwrap();
+
+        drop(competing);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
