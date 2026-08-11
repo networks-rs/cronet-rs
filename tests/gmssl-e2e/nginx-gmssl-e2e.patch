@@ -1,0 +1,59 @@
+diff --git a/src/event/ngx_event_gmssl.c b/src/event/ngx_event_gmssl.c
+index 5434094..1d896f7 100644
+--- a/src/event/ngx_event_gmssl.c
++++ b/src/event/ngx_event_gmssl.c
+@@ -85,7 +85,7 @@ ngx_ssl_create(ngx_ssl_t *ssl, ngx_uint_t protocols, void *data)
+         return NGX_ERROR;
+     }
+ 
+-    ssl->ctx = ngx_pcalloc(ngx_cycle->pool, sizeof(TLS_CTX));
++    ssl->ctx = ngx_calloc(sizeof(TLS_CTX), ssl->log);
+     if (ssl->ctx == NULL) {
+         return NGX_ERROR;
+     }
+@@ -126,15 +126,16 @@ ngx_ssl_certificate(ngx_conf_t *cf, ngx_ssl_t *ssl, ngx_str_t *cert,
+         return NGX_ERROR;
+     }
+ 
+-    if (ngx_gmssl_set_str(cf->pool, &ssl->certificate, cert) != NGX_OK
+-        || ngx_gmssl_set_str(cf->pool, &ssl->certificate_key, key) != NGX_OK)
++    if (ngx_gmssl_set_str(cf->cycle->pool, &ssl->certificate, cert) != NGX_OK
++        || ngx_gmssl_set_str(cf->cycle->pool, &ssl->certificate_key, key)
++               != NGX_OK)
+     {
+         return NGX_ERROR;
+     }
+ 
+     if (passwords && passwords->nelts) {
+         pwd = passwords->elts;
+-        if (ngx_gmssl_set_str(cf->pool, &ssl->certificate_pass, &pwd[0])
++        if (ngx_gmssl_set_str(cf->cycle->pool, &ssl->certificate_pass, &pwd[0])
+             != NGX_OK)
+         {
+             return NGX_ERROR;
+@@ -199,7 +200,9 @@ ngx_ssl_trusted_certificate(ngx_conf_t *cf, ngx_ssl_t *ssl, ngx_str_t *cert,
+         return NGX_ERROR;
+     }
+ 
+-    if (ngx_gmssl_set_str(cf->pool, &ssl->ca_certificate, cert) != NGX_OK) {
++    if (ngx_gmssl_set_str(cf->cycle->pool, &ssl->ca_certificate, cert)
++        != NGX_OK)
++    {
+         return NGX_ERROR;
+     }
+ 
+@@ -760,6 +763,7 @@ ngx_ssl_cleanup_ctx(void *data)
+ 
+     if (ssl->ctx) {
+         tls_ctx_cleanup(ssl->ctx);
++        ngx_free(ssl->ctx);
+         ssl->ctx = NULL;
+     }
+ }
+@@ -968,6 +972,5 @@ ngx_ssl_init_connection(ngx_connection_t *c)
+     ciphers_n = 0;
+     switch (protocol) {
+     case TLS_protocol_tlcp:
+-        ciphers[ciphers_n++] = TLS_cipher_ecdhe_sm4_cbc_sm3;
+         ciphers[ciphers_n++] = TLS_cipher_ecc_sm4_cbc_sm3;
+         break;

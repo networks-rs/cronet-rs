@@ -1,0 +1,44 @@
+worker_processes 1;
+daemon off;
+master_process off;
+
+error_log @RUNTIME@/logs/error.log info;
+pid @RUNTIME@/logs/nginx.pid;
+
+events {
+    worker_connections 64;
+}
+
+http {
+    access_log @RUNTIME@/logs/access.log;
+
+    server {
+        listen 8443 ssl;
+        server_name localhost;
+        ssl_protocols TLSv1.2;
+        ssl_certificate @RUNTIME@/tls-certs.pem;
+        ssl_certificate_key @RUNTIME@/tls-signkey.pem;
+        ssl_password_file @RUNTIME@/pass.txt;
+        root @RUNTIME@/html;
+    }
+
+    server {
+        listen 8444 ssl;
+        server_name localhost;
+        ssl_protocols TLSv1.3;
+        ssl_certificate @RUNTIME@/tls-certs.pem;
+        ssl_certificate_key @RUNTIME@/tls-signkey.pem;
+        ssl_password_file @RUNTIME@/pass.txt;
+        root @RUNTIME@/html;
+    }
+
+    server {
+        listen 8445 ssl;
+        server_name localhost;
+        ssl_protocols TLCP;
+        ssl_certificate @RUNTIME@/double-certs.pem;
+        ssl_certificate_key @RUNTIME@/double-keys.pem;
+        ssl_password_file @RUNTIME@/pass.txt;
+        root @RUNTIME@/html;
+    }
+}
