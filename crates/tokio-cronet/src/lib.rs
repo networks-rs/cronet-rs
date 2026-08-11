@@ -6,6 +6,8 @@ pub mod dns;
 mod engine;
 mod error;
 mod executor;
+#[cfg(feature = "gmssl_tls")]
+pub mod gmssl;
 mod request;
 mod types;
 
@@ -15,6 +17,8 @@ pub use bidirectional::{
 };
 pub use engine::{CacheMode, Engine, EngineBuilder, PublicKeyPins, QuicHint};
 pub use error::{Error, NetworkError, NetworkErrorCode, Result, ResultCode};
+#[cfg(feature = "gmssl_tls")]
+pub use gmssl::{GmSslClient, GmSslClientBuilder, GmSslError, GmSslProtocol, GmSslResponse};
 pub use request::{
     Idempotency, PendingRequest, Priority, RedirectAction, Request, RequestBuilder, RequestHandle,
     ResponseBody, StreamingResponse,
