@@ -1,0 +1,23 @@
+[package]
+name = "tokio-cronet-gmssl-sys"
+version = "0.1.0"
+edition = "2021"
+links = "gmssl"
+description = "Feature-enabled gmssl-rs-sys compatibility package for tokio-cronet"
+repository = "https://github.com/southorange/cronet-rs"
+homepage = "https://github.com/GmSSL/gmssl-rs"
+documentation = "https://docs.rs/tokio-cronet-gmssl-sys"
+license = "Apache-2.0"
+readme = "README.md"
+
+[features]
+default = []
+aes = []
+sha2 = []
+tls = []
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+cmake = "0.1"
