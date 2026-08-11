@@ -53,6 +53,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 | Feature | Default | Effect |
 | --- | --- | --- |
 | `dns` | yes | Adds the application-side Tokio/Hickory resolver |
+| `gmssl` | no | Enables the complete GmSSL transport (`gmssl_tls`, `gmssl_aes`, and `gmssl_sha2`) |
+| `gmssl_tls` | no | Adds the GmSSL HTTPS/TLCP client; transitively enables its AES/SHA2 build prerequisites |
+| `gmssl_aes` | no | Enables GmSSL's optional AES native component |
+| `gmssl_sha2` | no | Enables GmSSL's optional SHA-2 native component |
 | `static` | no | Builds and links the complete static Cronet archive |
 
 `static` is an additive override rather than a `dynamic`/`static` feature pair,
@@ -211,8 +215,81 @@ tokio-cronet = { version = "0.1", default-features = false }
 
 There is no OpenSSL dependency to replace. Cronet uses Chromium's BoringSSL
 internally for HTTPS and QUIC, and the C API has no TLS-provider injection
-point. Adding rustls to the safe crate would create a second, unused TLS stack.
-See the [DNS integration guide](docs/dns.md) for the exact boundary.
+point. The optional GmSSL client is therefore an explicit second transport,
+not a TLS-provider override for `Engine`. See the
+[DNS integration guide](docs/dns.md) for the exact boundary.
+
+### GmSSL national-cryptography transport
+
+Enable `gmssl` when an endpoint requires SM2/SM3/SM4 TLS or TLCP:
+
+```toml
+[dependencies]
+tokio-cronet = { version = "0.1", features = ["gmssl"] }
+```
+
+The pinned [gmssl-rs](https://github.com/GmSSL/gmssl-rs) dependency builds
+GmSSL 3.2.0 from source. The workspace maps its native options to Cargo
+features, so no `GMSSL_ENABLE_*` environment variables are required:
+
+```sh
+cargo build --features gmssl
+```
+
+`gmssl` is the convenient complete switch. `gmssl_tls` selects the same
+request transport and automatically includes `gmssl_aes` and `gmssl_sha2`,
+which GmSSL 3.2 requires while compiling TLS. The latter two can also be
+selected independently for builds that need only those native components.
+With none of these features selected, Cargo does not build or link GmSSL.
+
+Alternatively, set `GMSSL_DIR` to an installed GmSSL 3.2.0 prefix. GmSSL's
+public TLS structures depend on its compile-time feature macros, so an external
+installation must also provide the matching `-DENABLE_*` definitions through
+`GMSSL_CFLAGS`. The deterministic E2E build is an example:
+
+```sh
+GMSSL_DIR=/usr/local \
+GMSSL_CFLAGS='-DENABLE_AES -DENABLE_SHA2 -DENABLE_TLS' \
+cargo build --features gmssl
+```
+
+`GmSslClient` reuses the ordinary `Request` builder:
+
+```rust,no_run
+use tokio_cronet::{GmSslClient, GmSslProtocol, Request};
+
+async fn request() -> tokio_cronet::Result<()> {
+    let client = GmSslClient::builder()
+        .protocol(GmSslProtocol::Tls13)
+        .ca_certificates("certs/root-ca.pem")
+        .server_certificate("certs/server.pem")?
+        // For a server that requests client authentication:
+        // .client_identity("certs/client-chain.pem", "certs/client-key.pem", "password")
+        .build()?;
+    let request = Request::builder("https://gm.example/")?
+        .header("accept", "application/json")?
+        .build()?;
+    let response = client.execute(request).await?;
+    println!("{}: {} bytes", response.status(), response.body().len());
+    Ok(())
+}
+```
+
+The transport supports TLS 1.2 (`TLS_ECDHE_SM4_CBC_SM3`), TLS 1.3
+(`TLS_SM4_GCM_SM3`), and TLCP (`ECC_SM4_CBC_SM3`). GmSSL validates the chain
+against the configured CA, and the client additionally requires an exact SM3
+digest pin for the leaf certificate before it sends HTTP bytes. This pin is
+mandatory because the GmSSL 3.2 client API used here does not perform DNS-name
+validation. The current scope is one fresh connection per request, buffered
+uploads and responses, HTTP/1.1, and caller-managed redirects; streaming
+uploads, connection pooling, and QUIC remain on the Cronet transport.
+
+Run the real [nginx-gmssl](https://github.com/GmSSL/nginx-gmssl) integration
+gate with:
+
+```sh
+tests/gmssl-e2e/run.sh
+```
 
 ## Workspace architecture
 
@@ -433,6 +510,8 @@ version in this order, allowing the crates.io index to expose one package
 before publishing its dependent:
 
 ```sh
+cargo publish --manifest-path crates/gmssl-rs-sys-featured/Cargo.toml
+cargo publish --manifest-path crates/gmssl-rs-featured/Cargo.toml
 cargo publish -p tokio-cronet-src
 cargo publish -p tokio-cronet-sys
 cargo publish -p tokio-cronet

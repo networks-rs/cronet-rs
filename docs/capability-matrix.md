@@ -28,6 +28,7 @@ functions to safe callers.
 | DNS caching and diagnostics | Shared resolver cache, `clear_cache`, effective config/options, structured NXDOMAIN/no-record errors | Cache hit/flush and NXDOMAIN E2E |
 | Cronet request resolution | Remains Chromium `HostResolver`; upstream exposes no safe custom-resolver injection point | Architecture audit against the pinned C API |
 | HTTPS/QUIC TLS | Remains Chromium's bundled BoringSSL; this workspace has no OpenSSL dependency and upstream exposes no TLS-provider injection point | Dependency and native-source audit; HTTPS/HTTP2/QUIC E2E |
+| Optional national-cryptography HTTPS | `gmssl` is the complete switch for a separate `GmSslClient` using pinned `gmssl-rs`; `gmssl_tls`, `gmssl_aes`, and `gmssl_sha2` expose the native build choices; TLS 1.2, TLS 1.3, TLCP, CA validation, mandatory exact SM3 leaf pinning, and optional SM2 client identity | Feature-on/off dependency checks plus Docker E2E against pinned `nginx-gmssl` on three independent listeners |
 
 ## Engine and configuration
 
@@ -123,7 +124,7 @@ unsafe native-test code.
 - `cargo xtask audit-e2e` derives the public function set from the safe crate
   and compares it with `tests/e2e-coverage.tsv`. A new public function without
   a concrete test symbol, a removed function with a stale mapping, or a mapping
-  to a missing test source fails CI. The current manifest covers 105 functions.
+  to a missing test source fails CI. The current manifest covers 120 functions.
 - `crates/tokio-cronet/tests/support/portable_e2e.rs` is the single runtime-portable
   suite compiled into desktop integration tests and the Android, iOS, and
   OpenHarmony application runners. It covers success, typed
@@ -139,6 +140,9 @@ unsafe native-test code.
 - `dns_e2e` runs a process-local authoritative UDP service and covers custom
   configuration, typed queries, cache behavior, and structured failures
   without a public network or native Cronet library.
+- `tests/gmssl-e2e/run.sh` builds GmSSL 3.2 and pinned `nginx-gmssl` in Docker,
+  then proves the optional client can complete authenticated HTTP exchanges
+  over SM suites in TLS 1.2, TLS 1.3, and TLCP.
 - Every desktop source-build CI target runs the deterministic suite. Linux
   x86-64 also runs a protocol gate with `CRONET_E2E_REQUIRE_QUIC=1`.
 - Android and iOS runners compile the same portable source rather than a
