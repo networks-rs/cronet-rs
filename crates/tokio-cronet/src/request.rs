@@ -97,6 +97,15 @@ enum UploadBody {
     },
 }
 
+#[cfg(feature = "gmssl_tls")]
+pub(crate) struct GmSslRequestParts {
+    pub(crate) url: String,
+    pub(crate) method: String,
+    pub(crate) headers: Vec<Header>,
+    pub(crate) body: Option<Bytes>,
+    pub(crate) max_response_bytes: usize,
+}
+
 /// An immutable request ready to send once.
 pub struct Request {
     url: String,
@@ -138,6 +147,26 @@ impl fmt::Debug for Request {
 impl Request {
     pub fn builder(url: impl Into<String>) -> Result<RequestBuilder> {
         RequestBuilder::new(url)
+    }
+
+    #[cfg(feature = "gmssl_tls")]
+    pub(crate) fn into_gmssl_parts(self) -> Result<GmSslRequestParts> {
+        let default_method = if self.body.is_some() { "POST" } else { "GET" };
+        let method = self.method.unwrap_or_else(|| default_method.to_owned());
+        let body = match self.body {
+            Some(UploadBody::Bytes(body)) => Some(body),
+            Some(UploadBody::Reader { .. } | UploadBody::Rewindable { .. }) => {
+                return Err(crate::gmssl::GmSslError::StreamingUploadUnsupported.into());
+            }
+            None => None,
+        };
+        Ok(GmSslRequestParts {
+            url: self.url,
+            method,
+            headers: self.headers,
+            body,
+            max_response_bytes: self.max_response_bytes,
+        })
     }
 }
 

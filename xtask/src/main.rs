@@ -401,6 +401,7 @@ fn public_safe_api(root: &Path) -> Result<BTreeSet<String>, String> {
         "bidirectional.rs",
         "dns.rs",
         "engine.rs",
+        "gmssl.rs",
         "request.rs",
         "types.rs",
         "lib.rs",

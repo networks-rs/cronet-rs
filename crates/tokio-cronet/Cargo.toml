@@ -11,9 +11,18 @@ repository.workspace = true
 bytes = "1"
 tokio-cronet-sys = { path = "../tokio-cronet-sys", version = "0.1.1", default-features = false }
 futures-core = "0.3"
+gmssl-rs = { package = "tokio-cronet-gmssl", path = "../gmssl-rs-featured", version = "0.1.1", optional = true }
+# Keep a direct dependency so the high-level wrapper and the C shim share one
+# Cargo-selected `links = "gmssl"` native library provider.
+gmssl-rs-sys = { package = "tokio-cronet-gmssl-sys", path = "../gmssl-rs-sys-featured", version = "0.1.0", optional = true }
 hickory-resolver = { version = "0.25.2", default-features = false, features = ["system-config", "tokio"], optional = true }
+httparse = { version = "1.10.1", optional = true }
 serde_json = "1"
 tokio = { version = "1.44", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+url = { version = "2.5", optional = true }
+
+[build-dependencies]
+cc = "1"
 
 [dev-dependencies]
 brotli = "8.0.4"
@@ -23,6 +32,22 @@ default = ["dns"]
 # Tokio-native DNS queries backed by Hickory. This is an application-side
 # resolver and does not replace Chromium's resolver inside Cronet.
 dns = ["dep:hickory-resolver"]
+# One-switch configuration for the complete national-cryptography transport.
+gmssl = ["gmssl_tls"]
+# Fine-grained GmSSL native build options. GmSSL 3.2's TLS sources require its
+# AES and SHA-2 components even when only SM cipher suites are selected.
+gmssl_aes = ["dep:gmssl-rs-sys", "gmssl-rs-sys/aes"]
+gmssl_sha2 = ["dep:gmssl-rs-sys", "gmssl-rs-sys/sha2"]
+# Buffered HTTPS/1.1 over GmSSL's SM2/SM3/SM4 TLS 1.2, TLS 1.3, or TLCP.
+gmssl_tls = [
+    "gmssl_aes",
+    "gmssl_sha2",
+    "dep:gmssl-rs",
+    "gmssl-rs-sys/tls",
+    "dep:httparse",
+    "dep:url",
+]
+gmssl-tests = ["gmssl"]
 # Shared linking is the default. This additive override propagates through the
 # safe crate and selects the complete static native archive.
 static = ["tokio-cronet-sys/static"]

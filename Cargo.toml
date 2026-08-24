@@ -1,6 +1,7 @@
 [workspace]
 members = ["crates/tokio-cronet", "crates/tokio-cronet-sys", "xtask"]
 default-members = ["crates/tokio-cronet", "crates/tokio-cronet-sys"]
+exclude = ["crates/gmssl-rs-featured", "crates/gmssl-rs-sys-featured"]
 resolver = "2"
 
 [workspace.package]

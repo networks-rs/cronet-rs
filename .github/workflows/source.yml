@@ -102,7 +102,9 @@ jobs:
             --config 'patch.crates-io.tokio-cronet-src.path="xtask"'
           cargo package -p tokio-cronet --allow-dirty \
             --config 'patch.crates-io.tokio-cronet-src.path="xtask"' \
-            --config 'patch.crates-io.tokio-cronet-sys.path="crates/tokio-cronet-sys"'
+            --config 'patch.crates-io.tokio-cronet-sys.path="crates/tokio-cronet-sys"' \
+            --config 'patch.crates-io.tokio-cronet-gmssl.path="crates/gmssl-rs-featured"' \
+            --config 'patch.crates-io.tokio-cronet-gmssl-sys.path="crates/gmssl-rs-sys-featured"'
 
   android-source:
     name: Android ${{ matrix.target }} source build
@@ -238,6 +240,15 @@ jobs:
           IOS_E2E_TARGET='${{ matrix.target }}' IOS_E2E_LINKAGE=static \
             tests/mobile-e2e/ios/run.sh
 
+  gmssl-nginx:
+    name: GmSSL nginx interoperability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test TLS 1.2, TLS 1.3, and TLCP against nginx-gmssl
+        run: tests/gmssl-e2e/run.sh
+
   publish-check:
     name: Rust source crate publication check
     runs-on: ubuntu-24.04
@@ -250,4 +261,15 @@ jobs:
       - name: Require an E2E scenario for every public safe API
         run: cargo xtask audit-e2e
       - name: Check crate contents and metadata
-        run: cargo package --workspace --allow-dirty --no-verify
+        shell: bash
+        run: |
+          cargo package --manifest-path crates/gmssl-rs-sys-featured/Cargo.toml \
+            --allow-dirty --no-verify
+          cargo package --manifest-path crates/gmssl-rs-featured/Cargo.toml \
+            --allow-dirty --no-verify \
+            --config 'patch.crates-io.tokio-cronet-gmssl-sys.path="crates/gmssl-rs-sys-featured"'
+          cargo package --workspace --allow-dirty --no-verify \
+            --config 'patch.crates-io.tokio-cronet-src.path="xtask"' \
+            --config 'patch.crates-io.tokio-cronet-sys.path="crates/tokio-cronet-sys"' \
+            --config 'patch.crates-io.tokio-cronet-gmssl.path="crates/gmssl-rs-featured"' \
+            --config 'patch.crates-io.tokio-cronet-gmssl-sys.path="crates/gmssl-rs-sys-featured"'

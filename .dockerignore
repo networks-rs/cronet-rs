@@ -1,0 +1,7 @@
+.git
+.cronet
+target
+**/target
+tests/mobile-e2e/android/.build
+tests/mobile-e2e/ios/.build
+tests/ohos-e2e/.build

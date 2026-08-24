@@ -133,6 +133,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmake"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "critical-section"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -358,6 +367,12 @@ dependencies = [
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "httparse"
+version = "1.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "icu_collections"
@@ -994,11 +1009,32 @@ version = "0.1.1"
 dependencies = [
  "brotli",
  "bytes",
+ "cc",
  "futures-core",
  "hickory-resolver",
+ "httparse",
  "serde_json",
  "tokio",
+ "tokio-cronet-gmssl",
+ "tokio-cronet-gmssl-sys",
  "tokio-cronet-sys",
+ "url",
+]
+
+[[package]]
+name = "tokio-cronet-gmssl"
+version = "0.1.1"
+dependencies = [
+ "libc",
+ "tokio-cronet-gmssl-sys",
+]
+
+[[package]]
+name = "tokio-cronet-gmssl-sys"
+version = "0.1.0"
+dependencies = [
+ "cmake",
+ "libc",
 ]
 
 [[package]]

@@ -50,6 +50,9 @@ pub enum Error {
     BidirectionalApi { operation: &'static str, code: i32 },
     /// Chromium's network stack failed a bidirectional stream.
     BidirectionalStream { net_error: i32 },
+    /// The optional `GmSSL` transport failed.
+    #[cfg(feature = "gmssl_tls")]
+    GmSsl(crate::gmssl::GmSslError),
 }
 
 impl fmt::Display for Error {
@@ -96,6 +99,8 @@ impl fmt::Display for Error {
                     "bidirectional stream failed with net error {net_error}"
                 )
             }
+            #[cfg(feature = "gmssl_tls")]
+            Self::GmSsl(error) => error.fmt(formatter),
         }
     }
 }

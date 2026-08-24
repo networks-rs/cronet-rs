@@ -24,6 +24,7 @@ stale rows. It also rejects scenario names that do not occur in test sources.
 | Response body | bounded backpressure, `AsyncRead`, `Stream`, `next_chunk`, metrics, explicit cancel, handle cancel, response/body drop |
 | Bidirectional stream | HTTP/2 and HTTP/3 open, headers, trailers, `AsyncRead`, `AsyncWrite`, `Stream`, `next_chunk`, flush, half-close, terminal success/failure/cancel, active drop |
 | Rust-native DNS | system configuration, explicit upstream, generic and address/reverse queries, cache hit/flush, NXDOMAIN/no-record error classification |
+| GmSSL transport | CA validation, exact SM3 leaf pinning, optional client-identity loading, and HTTP exchange over TLS 1.2, TLS 1.3, and TLCP against `nginx-gmssl` |
 | Concurrency/lifetime | concurrent requests, repeated cancellation from cloned handles, callback completion during drop, concurrent shutdown, engine drop with active work |
 | Native delivery | shared and static linkage execute the same suite; mobile/OpenHarmony application runners compile the same portable scenario source |
 
@@ -37,3 +38,8 @@ Native integration tests run as OS test processes. Segmentation faults,
 double-free aborts, uncaught native exceptions, and deadlocks are job failures;
 they are not converted into successful Rust assertions. The portable stress
 scenario repeats cancellation/drop/shutdown ownership races before returning.
+
+The GmSSL gate is also process- and network-local: Docker builds pinned source
+revisions, starts three loopback-only `nginx-gmssl` listeners in the container,
+and terminates the server when the single test process exits. Its small
+upstream compatibility patch is documented beside the runner.
