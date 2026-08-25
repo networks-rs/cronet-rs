@@ -50,6 +50,10 @@ pub enum Error {
     BidirectionalApi { operation: &'static str, code: i32 },
     /// Chromium's network stack failed a bidirectional stream.
     BidirectionalStream { net_error: i32 },
+    /// Network quality APIs were used without enabling the estimator.
+    NetworkQualityEstimatorDisabled,
+    /// WebSocket handshake or session failed.
+    WebSocket { message: String, net_error: i32 },
 }
 
 impl fmt::Display for Error {
@@ -95,6 +99,12 @@ impl fmt::Display for Error {
                     formatter,
                     "bidirectional stream failed with net error {net_error}"
                 )
+            }
+            Self::NetworkQualityEstimatorDisabled => {
+                formatter.write_str("network quality estimator is not enabled")
+            }
+            Self::WebSocket { message, net_error } => {
+                write!(formatter, "WebSocket failed ({net_error}): {message}")
             }
         }
     }

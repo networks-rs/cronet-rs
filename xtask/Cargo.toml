@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 autobins = false
-include = ["Cargo.toml", "README.md", "SOURCE.lock", "filter_deps.py", "src/**/*.rs", "vendor/**"]
+include = ["Cargo.toml", "README.md", "SOURCE.lock", "filter_deps.py", "src/**/*.rs", "overlays/**", "wrappers/**", "vendor/**"]
 
 [dependencies]
 fs2 = "0.4"

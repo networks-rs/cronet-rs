@@ -1,0 +1,6 @@
+#!/bin/sh
+# Keep host rustfmt from discovering Chromium's nightly-only root config. The
+# selected real executable and this stable config are symlinked beside this
+# committed wrapper; no script is generated during a build.
+tool_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$tool_dir/rustfmt.real" --config-path "$tool_dir/rustfmt.toml" "$@"

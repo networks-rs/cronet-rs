@@ -1,0 +1,58 @@
+# Committed OHOS toolchain. Isolated from Chromium; the overlay only symlinks
+# this file to //cronet_rs_ohos_toolchain.
+import("//build/toolchain/gcc_toolchain.gni")
+
+declare_args() {
+  cronet_ohos_sdk_native = ""
+  cronet_ohos_compiler_resource_dir = ""
+  cronet_ohos_target_runtime_dir = ""
+}
+
+assert(cronet_ohos_sdk_native != "",
+       "tokio-cronet-src requires the OHOS Native SDK")
+assert(cronet_ohos_llvm_triple != "",
+       "tokio-cronet-src requires an OHOS LLVM target")
+assert(cronet_ohos_compiler_resource_dir != "",
+       "tokio-cronet-src requires the OHOS compiler runtime")
+assert(cronet_ohos_target_runtime_dir != "",
+       "tokio-cronet-src requires the OHOS target runtime")
+
+_clang_base = "//third_party/llvm-build/Release+Asserts"
+_bin = rebase_path(_clang_base + "/bin", root_build_dir)
+_sysroot = cronet_ohos_sdk_native + "/sysroot"
+_resource_dir = rebase_path(cronet_ohos_compiler_resource_dir, root_build_dir)
+_target_runtime_dir = rebase_path(cronet_ohos_target_runtime_dir, root_build_dir)
+_rust_triple = cronet_ohos_rust_triple
+_llvm_triple = cronet_ohos_llvm_triple
+_target_flag = "--target=" + cronet_ohos_llvm_triple
+
+gcc_toolchain("ohos") {
+  cc = _bin + "/clang"
+  cxx = _bin + "/clang++"
+  ld = cxx
+  ar = _bin + "/llvm-ar"
+  nm = _bin + "/llvm-nm"
+  readelf = _bin + "/llvm-readelf"
+  strip = _bin + "/llvm-strip"
+
+  extra_cflags = _target_flag + " --sysroot=" + _sysroot +
+                 " -D__MUSL__ -DCRONET_TARGET_OHOS" +
+                 " -fno-addrsig -Wno-unknown-warning-option"
+  extra_cppflags = "-Qunused-arguments"
+  extra_cxxflags = extra_cflags
+  extra_asmflags = _target_flag + " --sysroot=" + _sysroot
+  extra_ldflags = _target_flag + " --sysroot=" + _sysroot + " -fuse-ld=lld" +
+                  " -nostartfiles -resource-dir=" + _resource_dir + " -L" +
+                  _target_runtime_dir
+
+  toolchain_args = {
+    current_cpu = target_cpu
+    current_os = "linux"
+    cronet_target_ohos = true
+    cronet_ohos_llvm_triple = _llvm_triple
+    cronet_ohos_rust_triple = _rust_triple
+    clang_base_path = _clang_base
+    is_clang = true
+    use_remoteexec = false
+  }
+}

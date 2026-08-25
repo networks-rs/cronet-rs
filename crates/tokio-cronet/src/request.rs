@@ -139,6 +139,14 @@ impl Request {
     pub fn builder(url: impl Into<String>) -> Result<RequestBuilder> {
         RequestBuilder::new(url)
     }
+
+    pub(crate) fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub(crate) fn headers(&self) -> &[Header] {
+        &self.headers
+    }
 }
 
 /// Builder for buffered or streaming Cronet requests.

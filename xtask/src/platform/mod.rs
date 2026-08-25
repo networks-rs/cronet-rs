@@ -2,18 +2,23 @@
 //!
 //! The root build driver owns the invariant GN/Ninja transaction. Each
 //! implementation in this module owns target mapping, toolchain arguments,
-//! generated-source compatibility patches, and platform-only build outputs.
+//! overlay replacements that cannot be extra sources, and platform-only
+//! packaging (Android support jars, OHOS toolchain, iOS SDK args).
+//!
+//! Extra C/C++ and GN files, plus any Chromium replacements that cannot be
+//! extra sources, are committed under `xtask/overlays/` as real files of the
+//! original type and only symlinked into the overlay.
 
 use std::{path::Path, process::Command};
 
 use crate::{NativeLinkage, PlatformConfig};
 
-mod android;
+pub(crate) mod android;
 mod host;
-mod ios;
-mod linux;
+pub(crate) mod ios;
+pub(crate) mod linux;
 mod macos;
-mod ohos;
+pub(crate) mod ohos;
 mod windows;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,8 +101,6 @@ pub(super) trait PlatformBuild {
     fn filter_third_party_tests(&self) -> bool {
         true
     }
-
-    fn append_root_build(&self, _contents: &mut String) {}
 
     fn static_archive_extension(&self) -> &'static str {
         "a"

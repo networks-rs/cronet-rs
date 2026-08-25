@@ -24,6 +24,10 @@ stale rows. It also rejects scenario names that do not occur in test sources.
 | Response body | bounded backpressure, `AsyncRead`, `Stream`, `next_chunk`, metrics, explicit cancel, handle cancel, response/body drop |
 | Bidirectional stream | HTTP/2 and HTTP/3 open, headers, trailers, `AsyncRead`, `AsyncWrite`, `Stream`, `next_chunk`, flush, half-close, terminal success/failure/cancel, active drop |
 | Rust-native DNS | system configuration, explicit upstream, generic and address/reverse queries, cache hit/flush, NXDOMAIN/no-record error classification |
+| SSE | event parse, Last-Event-ID reconnect, cancel |
+| WebSocket | open, text/binary echo, close |
+| NQE | enable, localhost testing override, getters and subscription |
+| Network binding | engine handle round-trip; default-network HTTP still succeeds |
 | Concurrency/lifetime | concurrent requests, repeated cancellation from cloned handles, callback completion during drop, concurrent shutdown, engine drop with active work |
 | Native delivery | shared and static linkage execute the same suite; mobile/OpenHarmony application runners compile the same portable scenario source |
 

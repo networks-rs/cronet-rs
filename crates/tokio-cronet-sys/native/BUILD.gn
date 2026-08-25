@@ -1,0 +1,39 @@
+# Extra C ABI compiled into the Cronet shared and static libraries.
+# Sources are committed in tokio-cronet-sys and only symlinked into the
+# generated Cronet-only GN overlay. Upstream Chromium C/C++ is not patched.
+
+source_set("cronet_rs_native") {
+  sources = [
+    "cronet_rs_bind.cc",
+    "cronet_rs_c.h",
+    "cronet_rs_websocket.cc",
+  ]
+  if (is_android) {
+    sources += [ "cronet_rs_android_jni_onload.cc" ]
+  }
+  if (defined(cronet_target_ohos) && cronet_target_ohos) {
+    sources += [
+      "cronet_rs_ohos.cc",
+      "//net/cert/test_root_certs_builtin.cc",
+    ]
+  }
+
+  deps = [
+    "//base",
+    "//components/cronet/native:cronet_native_impl",
+    "//net",
+  ]
+
+  configs += [
+    "//build/config/compiler:no_exit_time_destructors",
+    "//components/cronet/native:cronet_native_include_config",
+  ]
+}
+
+if (is_android) {
+  source_set("cronet_rs_android_static") {
+    sources = [ "cronet_rs_android_static_support.cc" ]
+    deps = [ "//base" ]
+    configs += [ "//build/config/compiler:no_exit_time_destructors" ]
+  }
+}

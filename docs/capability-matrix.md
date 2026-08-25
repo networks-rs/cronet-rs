@@ -78,6 +78,21 @@ functions to safe callers.
 | Cancellation while a read/rewind is pending | native close cancels even permanently-pending Tokio I/O and still completes the sink contract | Dedicated pending-read and pending-rewind E2E tests |
 | Close | native close is internal; Rust source is released after terminal callback and pending completions | Cancellation/shutdown E2E |
 
+## Application-layer extras (Cargo features)
+
+These are not in the pinned Cronet C IDL. They wrap existing Cronet
+capabilities or committed wrapper sources compiled as overlay target
+`//components/cronet_rs:cronet_rs_native`. Upstream Chromium C/C++ is not
+patched for these features; the overlay only symlinks in-repo files and depends
+on them.
+
+| Extra | Safe/Tokio API | Implementation | Verification |
+| --- | --- | --- | --- |
+| SSE (`sse`) | `EventSource` / `EventSourceBuilder` | `text/event-stream` parser over `Engine::send` | Loopback event, reconnect, and cancel E2E |
+| WebSocket (`ws`) | `WebSocket` / `WebSocketBuilder` | Committed `cronet_rs_websocket.cc` wrapping `net::WebSocketChannel`; requires GN `enable_websockets=true` | Loopback echo and close E2E |
+| NQE (`nqe`) | `enable_network_quality_estimator`, RTT/throughput getters | Cronet `RequestFinishedInfo` metrics (Chromium NQE is not in the C API) | Loopback estimator E2E |
+| Network binding (`network-binding`) | `Engine::bind_to_network` | Committed wrapper table; `GetURLRequestContext` for WebSocket. Upstream `UrlRequest` has no bind parameter | Handle round-trip E2E; HTTP requests stay on the default network |
+
 ## Bidirectional HTTP/2 and QUIC streams
 
 | Upstream capability | Safe/Tokio API | Verification |

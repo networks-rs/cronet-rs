@@ -1,0 +1,5 @@
+# The sparse Cronet checkout has no ANGLE sources. Chromium's root .gn imports
+# this scope unconditionally, so provide the empty contract that it consumes.
+angle_dotfile_settings = {
+  exec_script_allowlist = []
+}

@@ -1,0 +1,3 @@
+group("cronet_rs") {
+  deps = [ "//components/cronet:cronet" ]
+}

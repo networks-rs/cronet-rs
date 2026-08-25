@@ -53,6 +53,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 | Feature | Default | Effect |
 | --- | --- | --- |
 | `dns` | yes | Adds the application-side Tokio/Hickory resolver |
+| `sse` | no | Server-Sent Events client over Cronet URL requests |
+| `ws` | no | WebSocket client using Chromium's WebSocketChannel through the Cronet engine |
+| `nqe` | no | Network quality estimates derived from Cronet request-finished metrics |
+| `network-binding` | no | Engine-level network handle honored by WebSocket connections |
 | `static` | no | Builds and links the complete static Cronet archive |
 
 `static` is an additive override rather than a `dynamic`/`static` feature pair,
@@ -334,8 +338,13 @@ cargo xtask build --release --gn-arg 'target_cpu="x64"'
 
 The builder creates an ignored Cronet-only GN overlay because Chromium's normal
 root graph imports browser-only targets even when only Cronet is requested. It
-also applies isolated compatibility patches without modifying the pinned
-upstream checkout.
+generates only the pruned GN graph needed by the sparse checkout; compatibility
+source text is never generated during a build. Small translation-unit wrappers
+are preferred, while full replacements are limited to GN/toolchain files,
+Android Java threading, and definitions that cannot be extended from outside
+their original class or template. Extra C ABI and link-time adapters are
+committed under `crates/tokio-cronet-sys` and compiled as overlay target
+`//components/cronet_rs`, without modifying the pinned upstream checkout.
 
 ### Platform notes
 
@@ -412,6 +421,7 @@ local and public-network scenarios:
 eval "$(cargo xtask print-env)"
 cargo test -p tokio-cronet --features native-tests --test native_smoke
 cargo test -p tokio-cronet --features native-tests --test e2e_local -- --test-threads=1
+cargo test -p tokio-cronet --features native-tests,sse,ws,nqe,network-binding --test native_smoke
 cargo test -p tokio-cronet --features static,native-tests --test native_smoke
 cargo test -p tokio-cronet --features static,native-tests --test e2e_local -- --test-threads=1
 cargo test -p tokio-cronet --features network-tests --test e2e_network -- --test-threads=1

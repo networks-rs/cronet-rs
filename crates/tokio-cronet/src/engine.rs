@@ -124,6 +124,8 @@ pub struct EngineBuilder {
     experimental_options: Option<String>,
     quic_hints: Vec<QuicHint>,
     public_key_pins: Vec<PublicKeyPins>,
+    #[cfg(feature = "nqe")]
+    pub(crate) enable_network_quality_estimator: bool,
 }
 
 impl Default for EngineBuilder {
@@ -141,6 +143,8 @@ impl Default for EngineBuilder {
             experimental_options: None,
             quic_hints: Vec::new(),
             public_key_pins: Vec::new(),
+            #[cfg(feature = "nqe")]
+            enable_network_quality_estimator: false,
         }
     }
 }
@@ -224,6 +228,7 @@ impl EngineBuilder {
     }
 
     /// Starts a new engine on the current Tokio runtime.
+    #[allow(clippy::too_many_lines)]
     pub fn build(self) -> Result<Engine> {
         validate_cache_size(self.cache)?;
         validate_experimental_options(self.experimental_options.as_deref())?;
@@ -307,7 +312,7 @@ impl EngineBuilder {
         }
 
         // SAFETY: engine and params are live for this call.
-        let result = unsafe { sys::Cronet_Engine_StartWithParams(raw, params) };
+        let result = unsafe { sys::Cronet_RS_Engine_StartWithParams(raw, params) };
         // SAFETY: Cronet copies parameters during StartWithParams.
         unsafe { sys::Cronet_EngineParams_Destroy(params) };
         if let Err(error) = check(result) {
@@ -326,6 +331,10 @@ impl EngineBuilder {
                 return Err(error);
             }
         };
+        #[cfg(feature = "nqe")]
+        let nqe = self.enable_network_quality_estimator.then(|| {
+            crate::nqe::NqeState::start(finished_context.events.subscribe(), executor.handle())
+        });
         Ok(Engine {
             inner: Arc::new(EngineInner {
                 native: Mutex::new(Some(NativeEngine {
@@ -339,6 +348,8 @@ impl EngineBuilder {
                 controls: Mutex::new(Vec::new()),
                 finished_context,
                 shutdown_result: OnceCell::new(),
+                #[cfg(feature = "nqe")]
+                nqe,
             }),
         })
     }
@@ -357,6 +368,10 @@ fn attach_finished_listener(
     }
     Ok((context, listener))
 }
+
+/// Handle that restores Cronet's default network selection.
+#[cfg(feature = "network-binding")]
+pub const UNBIND_NETWORK_HANDLE: i64 = -1;
 
 /// A cloneable, `Send + Sync` Cronet engine attached to a Tokio runtime.
 #[derive(Clone)]
@@ -449,6 +464,27 @@ impl Engine {
         self.inner.shutdown().await
     }
 
+    /// Binds subsequent WebSocket connections to `network_handle`.
+    ///
+    /// Pass [`UNBIND_NETWORK_HANDLE`] to use the default network. Upstream
+    /// `UrlRequest` has no bind API, so HTTP requests ignore this handle.
+    #[cfg(feature = "network-binding")]
+    pub fn bind_to_network(&self, network_handle: i64) -> Result<()> {
+        self.with_native(|native| {
+            // SAFETY: engine is live and the wrapper table does not retain `raw`.
+            unsafe { sys::Cronet_RS_Engine_BindToNetwork(native.raw, network_handle) };
+        })
+    }
+
+    /// Returns the handle last passed to [`Self::bind_to_network`].
+    #[cfg(feature = "network-binding")]
+    pub fn bound_network(&self) -> Result<i64> {
+        self.with_native(|native| {
+            // SAFETY: engine is live.
+            unsafe { sys::Cronet_RS_Engine_GetBoundNetwork(native.raw) }
+        })
+    }
+
     fn with_native<T>(&self, function: impl FnOnce(&NativeEngine) -> T) -> Result<T> {
         if self.inner.closing.load(Ordering::Acquire) {
             return Err(Error::EngineShutdown);
@@ -504,6 +540,8 @@ pub(crate) struct EngineInner {
     controls: Mutex<Vec<Weak<dyn RequestCanceler>>>,
     finished_context: Arc<EngineFinishedContext>,
     shutdown_result: OnceCell<Result<()>>,
+    #[cfg(feature = "nqe")]
+    pub(crate) nqe: Option<Arc<crate::nqe::NqeState>>,
 }
 
 impl EngineInner {
@@ -850,6 +888,8 @@ impl NativeEngine {
             listener.unregister(self.raw);
             drop(listener);
         }
+        // SAFETY: wrapper table is process-local and keyed by this engine pointer.
+        unsafe { sys::Cronet_RS_Engine_ClearBoundNetwork(self.raw) };
         // SAFETY: EngineInner waits for all operations before shutdown.
         check(unsafe { sys::Cronet_Engine_Shutdown(self.raw) })?;
         // SAFETY: successful shutdown releases all native engine use.

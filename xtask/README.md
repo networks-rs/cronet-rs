@@ -39,6 +39,13 @@ repository or a Cargo registry configured for large packages. The Rust wrapper
 crate remains publishable to crates.io and performs the same source build when
 the vendored tree is absent.
 
+The ignored GN view contains a mechanically pruned build graph for the sparse
+checkout, but no generated compatibility source. Platform behavior is supplied
+by committed include wrappers or link-time adapters wherever possible. Exact
+replacement files are reserved for GN/toolchain configuration, Android Java
+threading, and definitions that cannot be extended outside their original
+class or template.
+
 Run `cargo xtask vendor-source` from the main workspace to populate
 `vendor/chromium/src` for a fully offline source release. The command refuses
 to overwrite an existing destination and omits `.git`, `out`, `__pycache__`,

@@ -6,23 +6,37 @@ pub mod dns;
 mod engine;
 mod error;
 mod executor;
+#[cfg(feature = "nqe")]
+mod nqe;
 mod request;
+#[cfg(feature = "sse")]
+mod sse;
 mod types;
+#[cfg(feature = "ws")]
+mod websocket;
 
 pub use bidirectional::{
     BidirectionalRequest, BidirectionalRequestBuilder, BidirectionalResponseHeaders,
     BidirectionalStream,
 };
+#[cfg(feature = "network-binding")]
+pub use engine::UNBIND_NETWORK_HANDLE;
 pub use engine::{CacheMode, Engine, EngineBuilder, PublicKeyPins, QuicHint};
 pub use error::{Error, NetworkError, NetworkErrorCode, Result, ResultCode};
+#[cfg(feature = "nqe")]
+pub use nqe::{EffectiveConnectionType, NetworkQualityEstimates};
 pub use request::{
     Idempotency, PendingRequest, Priority, RedirectAction, Request, RequestBuilder, RequestHandle,
     ResponseBody, StreamingResponse,
 };
+#[cfg(feature = "sse")]
+pub use sse::{EventSource, EventSourceBuilder, SseEvent};
 pub use types::{
     FinishedReason, Header, RedirectInfo, RequestFinishedInfo, RequestMetrics, RequestStatus,
     Response, ResponseInfo,
 };
+#[cfg(feature = "ws")]
+pub use websocket::{WebSocket, WebSocketBuilder, WsMessage};
 
 #[cfg(all(target_os = "android", feature = "static"))]
 pub mod android {

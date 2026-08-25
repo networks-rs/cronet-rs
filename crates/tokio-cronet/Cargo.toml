@@ -23,6 +23,14 @@ default = ["dns"]
 # Tokio-native DNS queries backed by Hickory. This is an application-side
 # resolver and does not replace Chromium's resolver inside Cronet.
 dns = ["dep:hickory-resolver"]
+# Server-Sent Events client over Cronet UrlRequest streaming.
+sse = []
+# WebSocket client over Chromium's WebSocketChannel using the Cronet engine.
+ws = []
+# Network quality estimates derived from Cronet request-finished metrics.
+nqe = []
+# Engine-level network handle used by WebSocket (UrlRequest C API has no bind).
+network-binding = []
 # Shared linking is the default. This additive override propagates through the
 # safe crate and selects the complete static native archive.
 static = ["tokio-cronet-sys/static"]

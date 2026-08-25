@@ -4,8 +4,6 @@
 //! runs against the real Cronet library and a loopback HTTP server, so the same
 //! ownership and callback graph is exercised on every runtime platform.
 
-#![allow(dead_code)]
-
 use std::{
     collections::HashMap,
     future::{Future, poll_fn},
@@ -30,6 +28,7 @@ use tokio_cronet::{
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+#[allow(dead_code)] // Mobile runners call the suite; native_smoke exposes each case separately.
 pub async fn run_all() {
     request_api_and_tokio_io().await;
     request_controls_and_terminal_callbacks().await;
@@ -37,6 +36,14 @@ pub async fn run_all() {
     pending_upload_and_rewind_cancellation_are_safe().await;
     cancellation_and_shutdown_races_are_safe().await;
     bidirectional_configuration_and_failure_are_safe().await;
+    #[cfg(feature = "sse")]
+    sse_event_source_covers_events_reconnect_and_cancel().await;
+    #[cfg(feature = "ws")]
+    websocket_echo_and_close_are_terminal().await;
+    #[cfg(feature = "nqe")]
+    nqe_observes_localhost_after_testing_override().await;
+    #[cfg(feature = "network-binding")]
+    network_binding_round_trips_engine_handle().await;
     engine_drop_with_active_work_is_process_safe().await;
 }
 
@@ -774,6 +781,172 @@ pub async fn cancellation_and_shutdown_races_are_safe() {
     ));
 }
 
+#[cfg(feature = "sse")]
+pub async fn sse_event_source_covers_events_reconnect_and_cancel() {
+    let server = TestServer::start();
+    let engine = Engine::builder().build().unwrap();
+    let mut events = timeout(
+        "sse open",
+        tokio_cronet::EventSource::builder(server.url("/sse"))
+            .unwrap()
+            .open(&engine),
+    )
+    .await
+    .unwrap();
+    let first = timeout("sse first event", events.next_event())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.event, "greeting");
+    assert_eq!(first.data, "hello\nstream");
+    assert_eq!(first.id.as_deref(), Some("1"));
+    let second = timeout("sse second event", events.next_event())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.event, "message");
+    assert_eq!(second.data, "world");
+    events.cancel();
+    assert_eq!(events.last_event_id(), Some("1"));
+    let _ = events.handle();
+    let _ = events.is_done();
+    drop(events);
+
+    let mut reconnect = timeout(
+        "sse reconnect open",
+        engine
+            .event_source(server.url("/sse-id"))
+            .unwrap()
+            .auto_reconnect(true)
+            .retry(Duration::from_millis(20))
+            .last_event_id("1")
+            .max_response_bytes(usize::MAX)
+            .header("x-cronet-test", "sse")
+            .unwrap()
+            .open(&engine),
+    )
+    .await
+    .unwrap();
+    let event = timeout("sse reconnect event", reconnect.next_event())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.id.as_deref(), Some("2"));
+    assert_eq!(event.data, "second");
+    reconnect.cancel();
+    engine.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "ws")]
+pub async fn websocket_echo_and_close_are_terminal() {
+    let server = TestServer::start();
+    let engine = Engine::builder().build().unwrap();
+    assert!(tokio_cronet::WebSocket::builder(format!("ws://{}/ws", server.address())).is_ok());
+    let builder = engine
+        .websocket(format!("ws://{}/ws", server.address()))
+        .unwrap()
+        .protocol("echo")
+        .unwrap()
+        .origin("http://127.0.0.1")
+        .unwrap()
+        .header("x-cronet-test", "ws")
+        .unwrap();
+    let mut socket = timeout("websocket open", engine.open_websocket(builder))
+        .await
+        .unwrap();
+    timeout("websocket send text", socket.send_text("hello"))
+        .await
+        .unwrap();
+    let message = timeout("websocket echo", socket.next_message())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message, tokio_cronet::WsMessage::Text("hello".into()));
+    timeout("websocket send binary", socket.send_binary(b"bin".to_vec()))
+        .await
+        .unwrap();
+    let message = timeout("websocket binary echo", socket.next_message())
+        .await
+        .unwrap()
+        .unwrap();
+    match message {
+        tokio_cronet::WsMessage::Binary(payload) => assert_eq!(&payload[..], b"bin"),
+        other => panic!("expected binary echo, got {other:?}"),
+    }
+    let _ = socket.protocol();
+    let _ = socket.is_done();
+    timeout("websocket close", socket.close(1000, "bye"))
+        .await
+        .unwrap();
+    timeout("websocket terminal", async {
+        while !socket.is_done() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    socket.cancel();
+    drop(socket);
+    engine.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "nqe")]
+pub async fn nqe_observes_localhost_after_testing_override() {
+    let server = TestServer::start();
+    let engine = Engine::builder()
+        .enable_network_quality_estimator(true)
+        .build()
+        .unwrap();
+    engine
+        .configure_network_quality_estimator_for_testing(true, true, true)
+        .unwrap();
+    let mut updates = engine.subscribe_network_quality().unwrap();
+    for _ in 0..3 {
+        let _ = engine
+            .execute(
+                Request::builder(server.url("/ok"))
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    let _ = timeout("nqe update", updates.changed()).await;
+    let quality = engine.network_quality().unwrap();
+    let _ = engine.effective_connection_type().unwrap();
+    let _ = engine.http_rtt().unwrap();
+    let _ = engine.transport_rtt().unwrap();
+    let _ = engine.downstream_throughput_kbps().unwrap();
+    let _ = quality;
+    engine.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "network-binding")]
+pub async fn network_binding_round_trips_engine_handle() {
+    let server = TestServer::start();
+    let engine = Engine::builder().build().unwrap();
+    assert_eq!(
+        engine.bound_network().unwrap(),
+        tokio_cronet::UNBIND_NETWORK_HANDLE
+    );
+    engine.bind_to_network(42).unwrap();
+    assert_eq!(engine.bound_network().unwrap(), 42);
+    engine
+        .bind_to_network(tokio_cronet::UNBIND_NETWORK_HANDLE)
+        .unwrap();
+    let response = engine
+        .execute(
+            Request::builder(server.url("/ok"))
+                .unwrap()
+                .build()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    engine.shutdown().await.unwrap();
+}
+
 pub async fn engine_drop_with_active_work_is_process_safe() {
     let server = TestServer::start();
     // Repeatedly drop both sides of an active ownership graph. This scenario
@@ -1087,6 +1260,10 @@ impl TestServer {
     fn url(&self, path: &str) -> String {
         format!("http://{}{path}", self.address)
     }
+
+    fn address(&self) -> SocketAddr {
+        self.address
+    }
 }
 
 impl Drop for TestServer {
@@ -1199,12 +1376,222 @@ fn handle_connection(mut stream: TcpStream) {
             );
             finish(&mut stream);
         }
+        "/sse" => {
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n: ping\nevent: greeting\nid: 1\ndata: hello\ndata: stream\n\ndata: world\n\n",
+            );
+            finish(&mut stream);
+        }
+        "/sse-id" => {
+            let last = header(&request, "last-event-id");
+            let body = if last == "1" {
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\nid: 2\ndata: second\n\n".as_slice()
+            } else {
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\nid: 1\ndata: first\n\n".as_slice()
+            };
+            let _ = stream.write_all(body);
+            finish(&mut stream);
+        }
+        "/ws" => handle_websocket(&mut stream, &request),
         _ => respond(&mut stream, 404, "Not Found", &[], b"missing"),
     }
 }
 
 fn header<'a>(request: &'a TestRequest, name: &str) -> &'a str {
     request.headers.get(name).map_or("", String::as_str)
+}
+
+fn handle_websocket(stream: &mut TcpStream, request: &TestRequest) {
+    let key = header(request, "sec-websocket-key");
+    if key.is_empty() {
+        respond(stream, 400, "Bad Request", &[], b"missing websocket key");
+        return;
+    }
+    let accept = websocket_accept(key);
+    let protocol = header(request, "sec-websocket-protocol")
+        .split(',')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let _ = write!(
+        stream,
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n"
+    );
+    if let Some(protocol) = protocol {
+        let _ = write!(stream, "Sec-WebSocket-Protocol: {protocol}\r\n");
+    }
+    let _ = write!(stream, "\r\n");
+    let _ = stream.flush();
+    loop {
+        let (opcode, payload) = match read_ws_frame(stream) {
+            Ok(frame) => frame,
+            Err(_) => return,
+        };
+        match opcode {
+            0x1 | 0x2 => {
+                if write_ws_frame(stream, opcode, &payload).is_err() {
+                    return;
+                }
+            }
+            0x8 => {
+                let _ = write_ws_frame(stream, 0x8, &payload);
+                return;
+            }
+            0x9 => {
+                let _ = write_ws_frame(stream, 0xA, &payload);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn websocket_accept(key: &str) -> String {
+    let mut handshake = Vec::with_capacity(key.len() + 36);
+    handshake.extend_from_slice(key.as_bytes());
+    handshake.extend_from_slice(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    base64_encode(&sha1(&handshake))
+}
+
+fn read_ws_frame(stream: &mut TcpStream) -> io::Result<(u8, Vec<u8>)> {
+    let mut header = [0u8; 2];
+    stream.read_exact(&mut header)?;
+    let opcode = header[0] & 0x0f;
+    let masked = header[1] & 0x80 != 0;
+    let mut len = u64::from(header[1] & 0x7f);
+    if len == 126 {
+        let mut ext = [0u8; 2];
+        stream.read_exact(&mut ext)?;
+        len = u64::from(u16::from_be_bytes(ext));
+    } else if len == 127 {
+        let mut ext = [0u8; 8];
+        stream.read_exact(&mut ext)?;
+        len = u64::from_be_bytes(ext);
+    }
+    let mut mask = [0u8; 4];
+    if masked {
+        stream.read_exact(&mut mask)?;
+    }
+    let mut payload = vec![0u8; len as usize];
+    stream.read_exact(&mut payload)?;
+    if masked {
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mask[index % 4];
+        }
+    }
+    Ok((opcode, payload))
+}
+
+fn write_ws_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) -> io::Result<()> {
+    let mut frame = Vec::with_capacity(payload.len() + 10);
+    frame.push(0x80 | opcode);
+    if payload.len() < 126 {
+        frame.push(payload.len() as u8);
+    } else if payload.len() <= u16::MAX as usize {
+        frame.push(126);
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    }
+    frame.extend_from_slice(payload);
+    stream.write_all(&frame)?;
+    stream.flush()
+}
+
+fn sha1(data: &[u8]) -> [u8; 20] {
+    let mut message = data.to_vec();
+    let bit_len = data.len() as u64 * 8;
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bit_len.to_be_bytes());
+    let mut hash: [u32; 5] = [
+        0x6745_2301,
+        0xEFCD_AB89,
+        0x98BA_DCFE,
+        0x1032_5476,
+        0xC3D2_E1F0,
+    ];
+    for chunk in message.chunks_exact(64) {
+        let mut words = [0u32; 80];
+        for (index, word) in words.iter_mut().enumerate().take(16) {
+            *word = u32::from_be_bytes(chunk[index * 4..index * 4 + 4].try_into().unwrap());
+        }
+        for index in 16..80 {
+            words[index] =
+                (words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16])
+                    .rotate_left(1);
+        }
+        let mut a = hash[0];
+        let mut b = hash[1];
+        let mut c = hash[2];
+        let mut d = hash[3];
+        let mut e = hash[4];
+        for (index, word) in words.iter().enumerate() {
+            let (f, k) = match index {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
+                _ => (b ^ c ^ d, 0xCA62_C1D6),
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(*word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        hash[0] = hash[0].wrapping_add(a);
+        hash[1] = hash[1].wrapping_add(b);
+        hash[2] = hash[2].wrapping_add(c);
+        hash[3] = hash[3].wrapping_add(d);
+        hash[4] = hash[4].wrapping_add(e);
+    }
+    let mut output = [0u8; 20];
+    for (index, value) in hash.iter().enumerate() {
+        output[index * 4..index * 4 + 4].copy_from_slice(&value.to_be_bytes());
+    }
+    output
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::new();
+    let mut index = 0;
+    while index + 3 <= data.len() {
+        let n = (u32::from(data[index]) << 16)
+            | (u32::from(data[index + 1]) << 8)
+            | u32::from(data[index + 2]);
+        output.push(TABLE[((n >> 18) & 63) as usize] as char);
+        output.push(TABLE[((n >> 12) & 63) as usize] as char);
+        output.push(TABLE[((n >> 6) & 63) as usize] as char);
+        output.push(TABLE[(n & 63) as usize] as char);
+        index += 3;
+    }
+    match data.len() - index {
+        1 => {
+            let n = u32::from(data[index]) << 16;
+            output.push(TABLE[((n >> 18) & 63) as usize] as char);
+            output.push(TABLE[((n >> 12) & 63) as usize] as char);
+            output.push('=');
+            output.push('=');
+        }
+        2 => {
+            let n = (u32::from(data[index]) << 16) | (u32::from(data[index + 1]) << 8);
+            output.push(TABLE[((n >> 18) & 63) as usize] as char);
+            output.push(TABLE[((n >> 12) & 63) as usize] as char);
+            output.push(TABLE[((n >> 6) & 63) as usize] as char);
+            output.push('=');
+        }
+        _ => {}
+    }
+    output
 }
 
 fn read_request(stream: &TcpStream) -> io::Result<TestRequest> {

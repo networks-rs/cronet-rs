@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 links = "cronet"
 build = "build.rs"
-include = ["Cargo.toml", "build.rs", "src/**/*.rs", "wrapper.h"]
+include = ["Cargo.toml", "build.rs", "src/**/*.rs", "wrapper.h", "cronet_rs_c.h", "native/**"]
 
 [build-dependencies]
 bindgen = "0.72"

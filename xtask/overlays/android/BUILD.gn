@@ -1,0 +1,26 @@
+import("//build/config/android/rules.gni")
+
+group("cronet_rs") {
+  deps = [ "//components/cronet:cronet" ]
+}
+
+# base_java is compiled against a placeholder BuildConfig but intentionally
+# does not package it. Native-only consumers do not have an APK target to
+# generate the usual replacement, so compile the pinned placeholder here.
+android_library("cronet_rs_android_build_config_java") {
+  srcjar_deps = [ "//build/android:placeholder_build_config_srcjar" ]
+}
+
+# Chromium's Android net implementation calls these Java classes from native
+# code. Keep the jar deliberately narrower than the public Cronet Java API: a
+# Rust application uses Cronet through tokio-cronet-sys and only needs the
+# platform bridge and its runtime dependencies.
+dist_jar("cronet_rs_android_support_java") {
+  output = "$root_out_dir/cronet-android-support.jar"
+  deps = [
+    ":cronet_rs_android_build_config_java",
+    "//net/android:net_java",
+  ]
+  jar_excluded_patterns = [ "META-INF/versions/*/module-info.class" ]
+  requires_android = true
+}

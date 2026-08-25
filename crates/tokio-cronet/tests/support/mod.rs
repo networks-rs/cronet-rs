@@ -1,11 +1,9 @@
-#![allow(dead_code)]
-
 use std::{
     collections::HashMap,
     io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
@@ -18,7 +16,6 @@ pub struct TestServer {
     stopping: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
     cache_requests: Arc<AtomicUsize>,
-    paths: Arc<Mutex<Vec<String>>>,
 }
 
 impl TestServer {
@@ -30,10 +27,8 @@ impl TestServer {
         let address = listener.local_addr().expect("read local E2E address");
         let stopping = Arc::new(AtomicBool::new(false));
         let cache_requests = Arc::new(AtomicUsize::new(0));
-        let paths = Arc::new(Mutex::new(Vec::new()));
         let worker_stopping = stopping.clone();
         let worker_cache_requests = cache_requests.clone();
-        let worker_paths = paths.clone();
         let worker = thread::spawn(move || {
             while !worker_stopping.load(Ordering::Acquire) {
                 match listener.accept() {
@@ -42,8 +37,7 @@ impl TestServer {
                             .set_nonblocking(false)
                             .expect("make accepted E2E socket blocking");
                         let cache_requests = worker_cache_requests.clone();
-                        let paths = worker_paths.clone();
-                        thread::spawn(move || handle_connection(stream, &cache_requests, &paths));
+                        thread::spawn(move || handle_connection(stream, &cache_requests));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
@@ -57,7 +51,6 @@ impl TestServer {
             stopping,
             worker: Some(worker),
             cache_requests,
-            paths,
         }
     }
 
@@ -65,21 +58,8 @@ impl TestServer {
         format!("http://{}{path}", self.address)
     }
 
-    pub fn address(&self) -> SocketAddr {
-        self.address
-    }
-
     pub fn cache_requests(&self) -> usize {
         self.cache_requests.load(Ordering::Acquire)
-    }
-
-    pub fn path_count(&self, path: &str) -> usize {
-        self.paths
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .filter(|candidate| candidate.as_str() == path)
-            .count()
     }
 }
 
@@ -103,11 +83,7 @@ struct TestRequest {
 }
 
 #[allow(clippy::too_many_lines)]
-fn handle_connection(
-    mut stream: TcpStream,
-    cache_requests: &AtomicUsize,
-    paths: &Mutex<Vec<String>>,
-) {
+fn handle_connection(mut stream: TcpStream, cache_requests: &AtomicUsize) {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set local E2E read timeout");
@@ -128,10 +104,6 @@ fn handle_connection(
             return;
         }
     };
-    paths
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push(request.path.clone());
     if !request.body_complete {
         if request.path == "/redirect307" {
             respond_empty(
