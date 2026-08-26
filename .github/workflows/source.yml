@@ -3,6 +3,8 @@ name: Cronet source builds
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
   pull_request:
 
 concurrency:
@@ -36,7 +38,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust
         shell: bash
         env:
@@ -62,10 +64,12 @@ jobs:
           test -x /usr/lib/llvm-22/bin/clang
           cargo install bindgen-cli --version 0.72.0 --locked
           echo "CRONET_CLANG_DIR=/usr/lib/llvm-22" >> "$GITHUB_ENV"
-      - name: Use a short Chromium checkout path on Windows
+      - name: Configure the Chromium checkout on Windows
         if: runner.os == 'Windows'
         shell: bash
-        run: echo 'CRONET_SOURCE_DIR=C:/cr/src' >> "$GITHUB_ENV"
+        run: |
+          echo 'CRONET_SOURCE_DIR=C:/cr/src' >> "$GITHUB_ENV"
+          echo 'DEPOT_TOOLS_WIN_TOOLCHAIN=0' >> "$GITHUB_ENV"
       - name: Synchronize only the pinned Cronet source closure
         run: cargo xtask sync
       - name: Build shared and static Cronet from source
@@ -126,14 +130,14 @@ jobs:
           - target: i686-linux-android
             llvm-target: i686-linux-android
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust target
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add "${{ matrix.target }}"
       - name: Set up JDK for Android SDK tools
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -213,7 +217,7 @@ jobs:
             target: x86_64-apple-ios
             runtime-e2e: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust target
         run: |
           rustup toolchain install stable --profile minimal
@@ -246,7 +250,7 @@ jobs:
     name: Rust source crate publication check
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal

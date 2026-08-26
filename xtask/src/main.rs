@@ -736,11 +736,16 @@ fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> R
     run_command(&mut ninja_command, "compile Cronet from source")?;
     platform_build.post_build(&overlay_out_dir, &out_dir)?;
     if options.linkage.linkages().contains(&NativeLinkage::Static) {
+        let external_clang = config
+            .clang_dir
+            .map(Path::to_owned)
+            .or_else(|| env::var_os(CLANG_DIR_ENV).map(PathBuf::from));
         bundle_static_archive(
             &source,
             &overlay_out_dir,
             &out_dir,
             options.target.as_deref(),
+            external_clang.as_deref(),
         )?;
         write_static_link_manifest(
             &gn,
@@ -772,6 +777,7 @@ fn bundle_static_archive(
     build_dir: &Path,
     output_dir: &Path,
     target: Option<&str>,
+    external_clang: Option<&Path>,
 ) -> Result<(), String> {
     let raw_name = native_static_archive_name("cronet_static_raw");
     let bundled_name = native_static_archive_name("cronet_static");
@@ -825,13 +831,7 @@ fn bundle_static_archive(
     if temporary.exists() {
         fs::remove_file(&temporary).map_err(display_error("replace static archive temporary"))?;
     }
-    let llvm_ar = source
-        .join("third_party/llvm-build/Release+Asserts/bin")
-        .join(if cfg!(windows) {
-            "llvm-ar.exe"
-        } else {
-            "llvm-ar"
-        });
+    let llvm_ar = llvm_tool(source, external_clang, "llvm-ar");
     require_file(&llvm_ar, "run `cargo xtask sync` first")?;
     let mut child = Command::new(&llvm_ar)
         .arg("-M")
@@ -873,13 +873,7 @@ fn bundle_static_archive(
     // private Rust standard library exports the same C symbol from inside the
     // complete native archive; give that internal copy a private namespace so
     // the two toolchains can coexist in one final Rust link.
-    let llvm_objcopy = source
-        .join("third_party/llvm-build/Release+Asserts/bin")
-        .join(if cfg!(windows) {
-            "llvm-objcopy.exe"
-        } else {
-            "llvm-objcopy"
-        });
+    let llvm_objcopy = llvm_tool(source, external_clang, "llvm-objcopy");
     require_file(&llvm_objcopy, "run `cargo xtask sync` first")?;
     check_status(
         Command::new(llvm_objcopy)
@@ -892,6 +886,22 @@ fn bundle_static_archive(
             .status()
             .map_err(display_error("start llvm-objcopy for the static archive"))?,
         "isolate Chromium's Rust panic personality",
+    )
+}
+
+fn llvm_tool(source: &Path, external_clang: Option<&Path>, name: &str) -> PathBuf {
+    let binary = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    external_clang.map_or_else(
+        || {
+            source
+                .join("third_party/llvm-build/Release+Asserts/bin")
+                .join(&binary)
+        },
+        |directory| directory.join("bin").join(&binary),
     )
 }
 
@@ -2879,6 +2889,27 @@ pub mod android {
             "aarch64",
             "x86_64-unknown-linux-gnu"
         ));
+    }
+
+    #[test]
+    fn static_packaging_uses_the_configured_llvm_tools() {
+        let binary = if cfg!(windows) {
+            "llvm-ar.exe"
+        } else {
+            "llvm-ar"
+        };
+        assert_eq!(
+            llvm_tool(
+                Path::new("chromium"),
+                Some(Path::new("native-llvm")),
+                "llvm-ar"
+            ),
+            Path::new("native-llvm/bin").join(binary)
+        );
+        assert_eq!(
+            llvm_tool(Path::new("chromium"), None, "llvm-ar"),
+            Path::new("chromium/third_party/llvm-build/Release+Asserts/bin").join(binary)
+        );
     }
 
     #[test]
