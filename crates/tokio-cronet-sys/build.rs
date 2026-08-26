@@ -36,7 +36,7 @@ fn main() {
     println!("cargo:rerun-if-changed=native/cronet_rs_android_jni_onload.cc");
     println!("cargo:rerun-if-changed=native/cronet_rs_android_static_support.cc");
     println!("cargo:rerun-if-changed=native/cronet_rs_bind.cc");
-    println!("cargo:rerun-if-changed=native/cronet_rs_ohos.cc");
+    println!("cargo:rerun-if-changed=native/cronet_rs_linux.cc");
     println!("cargo:rerun-if-changed=native/cronet_rs_websocket.cc");
 
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());

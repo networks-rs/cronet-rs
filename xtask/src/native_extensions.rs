@@ -32,8 +32,8 @@ pub fn apply(overlay: &Path) -> Result<(), String> {
         &dest.join("cronet_rs_android_static_support.cc"),
     )?;
     ensure_symlink(
-        &sys.join("native/cronet_rs_ohos.cc"),
-        &dest.join("cronet_rs_ohos.cc"),
+        &sys.join("native/cronet_rs_linux.cc"),
+        &dest.join("cronet_rs_linux.cc"),
     )?;
     Ok(())
 }
@@ -73,7 +73,7 @@ fn crate_wrapper_paths() -> [PathBuf; 7] {
         sys.join("native/cronet_rs_android_jni_onload.cc"),
         sys.join("native/cronet_rs_android_static_support.cc"),
         sys.join("native/cronet_rs_bind.cc"),
-        sys.join("native/cronet_rs_ohos.cc"),
+        sys.join("native/cronet_rs_linux.cc"),
         sys.join("native/cronet_rs_websocket.cc"),
     ]
 }
@@ -104,7 +104,7 @@ mod tests {
         assert!(build.contains("cronet_rs_c.h"));
         assert!(build.contains("cronet_rs_android_jni_onload.cc"));
         assert!(build.contains("cronet_rs_android_static"));
-        assert!(build.contains("cronet_rs_ohos.cc"));
+        assert!(build.contains("cronet_rs_linux.cc"));
         assert!(build.contains("//components/cronet/native:cronet_native_impl"));
     }
 }

@@ -649,9 +649,12 @@ fn common_gn_args(release: bool) -> Vec<String> {
         "enable_device_bound_sessions=false".to_owned(),
         "enable_perfetto_trace_processor_sqlite=false".to_owned(),
         "use_platform_icu_alternatives=false".to_owned(),
-        // Standalone Cronet has no Chromium UI tree. On desktop Linux the
-        // upstream default otherwise adds //ui/base/glib to //net.
+        // Standalone Cronet has no Chromium UI tree or host development
+        // packages. Linux uses the non-GIO proxy fallback and Chromium's
+        // built-in root store.
         "use_glib=false".to_owned(),
+        "use_gio=false".to_owned(),
+        "use_nss_certs=false".to_owned(),
         // Keep the build compatible with older Xcode SDKs that predate the
         // split DarwinFoundation{1,2,3}.modulemap files.
         "use_clang_modules=false".to_owned(),
@@ -733,7 +736,12 @@ fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> R
     run_command(&mut ninja_command, "compile Cronet from source")?;
     platform_build.post_build(&overlay_out_dir, &out_dir)?;
     if options.linkage.linkages().contains(&NativeLinkage::Static) {
-        bundle_static_archive(&source, &overlay_out_dir, &out_dir)?;
+        bundle_static_archive(
+            &source,
+            &overlay_out_dir,
+            &out_dir,
+            options.target.as_deref(),
+        )?;
         write_static_link_manifest(
             &gn,
             &depot_tools,
@@ -759,7 +767,12 @@ fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> R
 }
 
 #[allow(clippy::too_many_lines)] // Archive discovery, MRI assembly, and symbol isolation are one transaction.
-fn bundle_static_archive(source: &Path, build_dir: &Path, output_dir: &Path) -> Result<(), String> {
+fn bundle_static_archive(
+    source: &Path,
+    build_dir: &Path,
+    output_dir: &Path,
+    target: Option<&str>,
+) -> Result<(), String> {
     let raw_name = native_static_archive_name("cronet_static_raw");
     let bundled_name = native_static_archive_name("cronet_static");
     let raw_archive = build_dir.join(raw_name);
@@ -789,14 +802,17 @@ fn bundle_static_archive(source: &Path, build_dir: &Path, output_dir: &Path) -> 
             archives.push(archive);
         }
     }
+    let omit_allocator =
+        target.is_some_and(|target| platform::kind(target) == Some(platform::PlatformKind::Ohos));
     for relative in rust_archives.split_ascii_whitespace() {
-        if is_chromium_rust_allocator_shim(relative) {
-            // tokio-cronet-src is a Rust native dependency, so the final Cargo
-            // artifact supplies these lang-item allocator symbols. Bundling
-            // Chromium's executable-oriented shim as well causes duplicate
-            // `__rust_alloc*` definitions on strict ELF linkers such as OHOS
-            // lld. Other Chromium Rust rlibs, including the allocation-error
-            // C++ bridge, remain part of the complete archive.
+        if omit_allocator
+            && relative.starts_with("obj/build/rust/allocator/liballocator_")
+            && Path::new(relative)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("rlib"))
+        {
+            // OHOS uses the same Rust allocator ABI as the final Cargo
+            // artifact, so bundling Chromium's shim creates duplicate symbols.
             continue;
         }
         let archive = build_dir.join(relative);
@@ -877,17 +893,6 @@ fn bundle_static_archive(source: &Path, build_dir: &Path, output_dir: &Path) -> 
             .map_err(display_error("start llvm-objcopy for the static archive"))?,
         "isolate Chromium's Rust panic personality",
     )
-}
-
-fn is_chromium_rust_allocator_shim(path: &str) -> bool {
-    let path = path.replace('\\', "/");
-    path.rsplit_once('/').is_some_and(|(directory, file)| {
-        directory.ends_with("obj/build/rust/allocator")
-            && file.starts_with("liballocator_")
-            && Path::new(file)
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("rlib"))
-    })
 }
 
 fn native_static_archive_name(stem: &str) -> String {
@@ -2737,22 +2742,6 @@ pub mod android {
     }
 
     #[test]
-    fn excludes_only_the_chromium_rust_allocator_shim_from_static_bundles() {
-        assert!(is_chromium_rust_allocator_shim(
-            "obj/build/rust/allocator/liballocator_6ead5877.rlib"
-        ));
-        assert!(is_chromium_rust_allocator_shim(
-            r"obj\build\rust\allocator\liballocator_6ead5877.rlib"
-        ));
-        assert!(!is_chromium_rust_allocator_shim(
-            "obj/build/rust/allocator/liballoc_error_handler_impl_ffi.rlib"
-        ));
-        assert!(!is_chromium_rust_allocator_shim(
-            "obj/other/liballocator_6ead5877.rlib"
-        ));
-    }
-
-    #[test]
     fn committed_overlay_files_are_typed_wrappers() {
         let rustfmt = include_str!("../wrappers/rustfmt");
         assert!(rustfmt.contains("rustfmt.real"));
@@ -2866,14 +2855,11 @@ pub mod android {
     }
 
     #[test]
-    fn standalone_build_disables_the_chromium_ui_glib_dependency() {
+    fn standalone_build_avoids_linux_host_development_packages() {
         let arguments = common_gn_args(true);
-        assert!(
-            arguments
-                .iter()
-                .any(|argument| argument == "use_glib=false")
-        );
-        assert!(!arguments.iter().any(|argument| argument == "use_glib=true"));
+        for argument in ["use_glib=false", "use_gio=false", "use_nss_certs=false"] {
+            assert!(arguments.iter().any(|candidate| candidate == argument));
+        }
     }
 
     #[test]
