@@ -64,6 +64,8 @@ jobs:
           test -x /usr/lib/llvm-22/bin/clang
           cargo install bindgen-cli --version 0.72.0 --locked
           echo "CRONET_CLANG_DIR=/usr/lib/llvm-22" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/lib/llvm-22/bin/clang" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-Clink-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
       - name: Configure the Chromium checkout on Windows
         if: runner.os == 'Windows'
         shell: bash
@@ -188,13 +190,22 @@ jobs:
             -no-window -no-audio -no-snapshot-save >android-emulator.log 2>&1 &
           emulator_pid=$!
           trap 'kill "$emulator_pid" 2>/dev/null || true' EXIT
-          adb wait-for-device
+          if ! timeout 120 adb wait-for-device; then
+            tail -n 200 android-emulator.log
+            exit 1
+          fi
           for _ in $(seq 1 180); do
             [[ $(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r') == 1 ]] && break
-            kill -0 "$emulator_pid"
+            if ! kill -0 "$emulator_pid"; then
+              tail -n 200 android-emulator.log
+              exit 1
+            fi
             sleep 1
           done
-          [[ $(adb shell getprop sys.boot_completed | tr -d '\r') == 1 ]]
+          if [[ $(adb shell getprop sys.boot_completed | tr -d '\r') != 1 ]]; then
+            tail -n 200 android-emulator.log
+            exit 1
+          fi
           ANDROID_E2E_TARGET=x86_64-linux-android ANDROID_E2E_LINKAGE=dynamic \
             tests/mobile-e2e/android/run.sh
           ANDROID_E2E_TARGET=x86_64-linux-android ANDROID_E2E_LINKAGE=static \

@@ -683,6 +683,7 @@ fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> R
     require_file(&ninja, "run `cargo xtask sync` (without --api-only) first")?;
 
     let platform_build = platform::resolve(options.target.as_deref())?;
+    let uses_external_rust = platform_build.needs_rustc_bootstrap(config);
     let out_dir = native_output_dir(&source, options.target.as_deref());
     let overlay = write_cronet_overlay(&source, platform_build.as_ref())?;
     let overlay_out_dir = native_output_dir(&overlay, options.target.as_deref());
@@ -709,7 +710,7 @@ fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> R
         .env_remove("TARGET")
         .arg("-C")
         .arg(&overlay_out_dir);
-    if platform_build.needs_rustc_bootstrap(config) {
+    if uses_external_rust {
         // Chromium's external-Rust path still emits a small set of -Z build
         // flags even when rustc_nightly_capability is false. Scope the stable
         // compiler opt-in to this native build subprocess; never mutate the
@@ -744,8 +745,8 @@ fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> R
             &source,
             &overlay_out_dir,
             &out_dir,
-            options.target.as_deref(),
             external_clang.as_deref(),
+            uses_external_rust,
         )?;
         write_static_link_manifest(
             &gn,
@@ -776,8 +777,8 @@ fn bundle_static_archive(
     source: &Path,
     build_dir: &Path,
     output_dir: &Path,
-    target: Option<&str>,
     external_clang: Option<&Path>,
+    uses_external_rust: bool,
 ) -> Result<(), String> {
     let raw_name = native_static_archive_name("cronet_static_raw");
     let bundled_name = native_static_archive_name("cronet_static");
@@ -808,17 +809,11 @@ fn bundle_static_archive(
             archives.push(archive);
         }
     }
-    let omit_allocator =
-        target.is_some_and(|target| platform::kind(target) == Some(platform::PlatformKind::Ohos));
     for relative in rust_archives.split_ascii_whitespace() {
-        if omit_allocator
-            && relative.starts_with("obj/build/rust/allocator/liballocator_")
-            && Path::new(relative)
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("rlib"))
-        {
-            // OHOS uses the same Rust allocator ABI as the final Cargo
-            // artifact, so bundling Chromium's shim creates duplicate symbols.
+        if uses_external_rust && is_chromium_rust_allocator_shim(relative) {
+            // An external Rust sysroot is also used by the final Cargo
+            // artifact, so bundling Chromium's allocator shim would define
+            // the same allocator ABI twice.
             continue;
         }
         let archive = build_dir.join(relative);
@@ -887,6 +882,17 @@ fn bundle_static_archive(
             .map_err(display_error("start llvm-objcopy for the static archive"))?,
         "isolate Chromium's Rust panic personality",
     )
+}
+
+fn is_chromium_rust_allocator_shim(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    path.rsplit_once('/').is_some_and(|(directory, file)| {
+        directory.ends_with("obj/build/rust/allocator")
+            && file.starts_with("liballocator_")
+            && Path::new(file)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("rlib"))
+    })
 }
 
 fn llvm_tool(source: &Path, external_clang: Option<&Path>, name: &str) -> PathBuf {
@@ -1696,7 +1702,8 @@ fn write_gclient(chromium_root: &Path, target: Option<&str>) -> Result<(), Strin
          \x20   'checkout_wpr_archives': False,\n\
          \x20 }},\n\
          }}]\n\
-         target_os = {target_os}\n"
+         target_os = {target_os}\n\
+         cache_dir = None\n"
     );
     fs::write(chromium_root.join(".gclient"), contents).map_err(display_error("write .gclient"))
 }
@@ -2910,6 +2917,22 @@ pub mod android {
             llvm_tool(Path::new("chromium"), None, "llvm-ar"),
             Path::new("chromium/third_party/llvm-build/Release+Asserts/bin").join(binary)
         );
+    }
+
+    #[test]
+    fn external_rust_static_packaging_excludes_only_the_allocator_shim() {
+        assert!(is_chromium_rust_allocator_shim(
+            "obj/build/rust/allocator/liballocator_6ead5877.rlib"
+        ));
+        assert!(is_chromium_rust_allocator_shim(
+            r"obj\build\rust\allocator\liballocator_6ead5877.rlib"
+        ));
+        assert!(!is_chromium_rust_allocator_shim(
+            "obj/build/rust/allocator/liballoc_error_handler_impl_ffi.rlib"
+        ));
+        assert!(!is_chromium_rust_allocator_shim(
+            "obj/other/liballocator_6ead5877.rlib"
+        ));
     }
 
     #[test]
