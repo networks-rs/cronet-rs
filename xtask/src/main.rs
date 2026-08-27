@@ -2113,7 +2113,7 @@ fn write_cronet_component_overlay(
 pub(crate) fn replace_generated_link_with_directory(path: &Path) -> Result<(), String> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() {
-            fs::remove_file(path).map_err(display_error("replace Cronet overlay link"))?;
+            remove_overlay_symlink(path)?;
         } else if metadata.is_dir() {
             return Ok(());
         } else {
@@ -2128,7 +2128,9 @@ pub(crate) fn replace_generated_link_with_directory(path: &Path) -> Result<(), S
 
 pub(crate) fn replace_generated_link_with_file(path: &Path) -> Result<(), String> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || metadata.is_file() {
+        if metadata.file_type().is_symlink() {
+            remove_overlay_symlink(path)?;
+        } else if metadata.is_file() {
             fs::remove_file(path).map_err(display_error("replace Cronet overlay link"))?;
         } else {
             return Err(format!(
@@ -2138,6 +2140,24 @@ pub(crate) fn replace_generated_link_with_file(path: &Path) -> Result<(), String
         }
     }
     Ok(())
+}
+
+fn remove_overlay_symlink(path: &Path) -> Result<(), String> {
+    let result = fs::remove_file(path).or_else(|error| {
+        if path.is_dir() {
+            // Windows requires directory symlinks to be removed with the
+            // directory API. This removes only the link, never its target.
+            fs::remove_dir(path)
+        } else {
+            Err(error)
+        }
+    });
+    result.map_err(|error| {
+        format!(
+            "failed to replace Cronet overlay link {}: {error}",
+            path.display()
+        )
+    })
 }
 
 pub(crate) fn write_if_changed(
@@ -2387,7 +2407,7 @@ pub(crate) fn ensure_symlink(target: &Path, link: &Path) -> Result<(), String> {
             if fs::read_link(link).is_ok_and(|existing| existing == target) {
                 return Ok(());
             }
-            fs::remove_file(link).map_err(display_error("replace Cronet overlay link"))?;
+            remove_overlay_symlink(link)?;
             return create_symlink(target, link)
                 .map_err(display_error("create Cronet GN overlay link"));
         }
@@ -3126,5 +3146,28 @@ group("remove") {
         let filtered = remove_named_gn_blocks(source.to_owned(), "group", "remove").unwrap();
         assert!(filtered.contains("group(\"keep\")"));
         assert!(!filtered.contains("group(\"remove\")"));
+    }
+
+    #[test]
+    fn materializes_a_directory_over_an_overlay_symlink() {
+        let root = env::temp_dir().join(format!(
+            "cronet-rs-overlay-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target = root.join("target");
+        let link = root.join("link");
+        fs::create_dir_all(&target).unwrap();
+        create_symlink(&target, &link).unwrap();
+
+        replace_generated_link_with_directory(&link).unwrap();
+
+        let metadata = fs::symlink_metadata(&link).unwrap();
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
+        fs::remove_dir_all(root).unwrap();
     }
 }
