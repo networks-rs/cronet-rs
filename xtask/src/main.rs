@@ -2248,6 +2248,13 @@ fn remove_testonly_gn_blocks(mut source: String) -> String {
         "test",
     ];
 
+    // `str::lines` removes both bytes from CRLF, while the offset scan below
+    // advances one byte for each line ending. Normalize Windows checkouts so
+    // calculated byte offsets continue to address the original GN tokens.
+    if source.contains("\r\n") {
+        source = source.replace("\r\n", "\n");
+    }
+
     loop {
         let candidate = source
             .lines()
@@ -3096,10 +3103,12 @@ component("test_support") {
   deps = [ ":runtime" ]
 }
 "#;
-        let filtered = remove_testonly_gn_blocks(source.to_owned());
-        assert!(filtered.contains("component(\"runtime\")"));
-        assert!(filtered.contains("${root}/runtime.cc"));
-        assert!(!filtered.contains("test_support"));
+        for source in [source.to_owned(), source.replace('\n', "\r\n")] {
+            let filtered = remove_testonly_gn_blocks(source);
+            assert!(filtered.contains("component(\"runtime\")"));
+            assert!(filtered.contains("${root}/runtime.cc"));
+            assert!(!filtered.contains("test_support"));
+        }
     }
 
     #[test]
