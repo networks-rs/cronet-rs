@@ -93,6 +93,17 @@ pub(crate) const IOS: &[SourceWrapper] = &[SourceWrapper {
     upstream_alias: "base/features_upstream.cc",
 }];
 
+pub(crate) const WINDOWS: &[OverlayFile] = &[OverlayFile {
+    dest: "net/tools/root_store_tool/BUILD.gn",
+    src: "windows/net/tools/root_store_tool/BUILD.gn",
+}];
+
+pub(crate) const WINDOWS_SOURCE_WRAPPERS: &[SourceWrapper] = &[SourceWrapper {
+    dest: "build/vs_toolchain.py",
+    src: "windows/build/vs_toolchain.py",
+    upstream_alias: "build/vs_toolchain_upstream.py",
+}];
+
 pub(crate) const OHOS: &[OverlayFile] = &[
     OverlayFile {
         dest: "cronet_rs_ohos_toolchain/BUILD.gn",

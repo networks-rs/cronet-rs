@@ -4,9 +4,10 @@ These committed files are symlinked into the ignored Cronet-only GN view. The
 native build never generates compatibility source text.
 
 - `common/` is installed for every target.
-- `android/`, `ios/`, and `ohos/` are installed only for that platform.
-- Small C/C++ wrappers include an explicitly named upstream alias and confine
-  macro changes to one translation unit.
+- `android/`, `ios/`, `ohos/`, and `windows/` are installed only for that
+  platform.
+- Small C/C++ and Python wrappers include an explicitly named upstream alias
+  and confine compatibility changes to one translation unit or process.
 - Link-time adapters and new C ABI are under `crates/tokio-cronet-sys/native`.
 - Full replacements remain only where a wrapper cannot act early enough: GN
   configuration, Android's Java Looper bridge, and an upstream template

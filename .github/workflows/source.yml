@@ -31,7 +31,9 @@ jobs:
             target: x86_64-apple-darwin
           - runner: macos-15
             target: aarch64-apple-darwin
-          - runner: windows-2025
+          # Chromium 144 supports Visual Studio through 2022. The
+          # windows-2025 label now selects the VS 2026 runner image.
+          - runner: windows-2022
             target: x86_64-pc-windows-msvc
           - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
@@ -68,10 +70,28 @@ jobs:
           echo "RUSTFLAGS=-Clink-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
       - name: Configure the Chromium checkout on Windows
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          echo 'CRONET_SOURCE_DIR=C:/cr/src' >> "$GITHUB_ENV"
-          echo 'DEPOT_TOOLS_WIN_TOOLCHAIN=0' >> "$GITHUB_ENV"
+          $vs2022 = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise"
+          if (-not (Test-Path $vs2022)) {
+            throw "Visual Studio 2022 was not found at $vs2022"
+          }
+
+          rustup component add llvm-tools-preview
+          $rustSysroot = rustc --print sysroot
+          $rustHost = (rustc -vV | Select-String '^host: ').Line.Substring(6)
+          $rustLlvm = Join-Path $rustSysroot "lib\rustlib\$rustHost"
+          foreach ($tool in @('llvm-ar.exe', 'llvm-nm.exe', 'llvm-objcopy.exe')) {
+            $toolPath = Join-Path $rustLlvm "bin\$tool"
+            if (-not (Test-Path $toolPath)) {
+              throw "$tool was not found at $toolPath"
+            }
+          }
+
+          "CRONET_SOURCE_DIR=C:/cr/src" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "CRONET_CLANG_DIR=$($rustLlvm.Replace('\', '/'))" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "DEPOT_TOOLS_WIN_TOOLCHAIN=0" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "vs2022_install=$vs2022" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
       - name: Synchronize only the pinned Cronet source closure
         run: cargo xtask sync
       - name: Build shared and static Cronet from source
@@ -89,7 +109,11 @@ jobs:
           export CRONET_SOURCE_DIR="${CRONET_SOURCE_DIR:-$PWD/.cronet/chromium/src}"
           export CRONET_LIB_DIR="$CRONET_SOURCE_DIR/out/cronet-rs/$(printf '%s' '${{ matrix.target }}' | tr -c '[:alnum:]' '_')"
           export MACOSX_DEPLOYMENT_TARGET=12.0
-          export PATH="$CRONET_LIB_DIR:$PATH"
+          runtime_lib_dir="$CRONET_LIB_DIR"
+          if command -v cygpath >/dev/null; then
+            runtime_lib_dir="$(cygpath --unix "$runtime_lib_dir")"
+          fi
+          export PATH="$runtime_lib_dir:$PATH"
           export LD_LIBRARY_PATH="$CRONET_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export DYLD_LIBRARY_PATH="$CRONET_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
           cargo test -p tokio-cronet --features native-tests --test e2e_local --test native_smoke -- --test-threads=1
@@ -183,8 +207,12 @@ jobs:
         shell: bash
         run: |
           sdkmanager 'emulator' 'system-images;android-34;google_apis;x86_64'
-          echo no | avdmanager create avd --force --name cronet-rs-e2e \
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/android-avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          printf 'no\n' | avdmanager create avd --force --name cronet-rs-e2e \
             --package 'system-images;android-34;google_apis;x86_64'
+          test -f "$ANDROID_AVD_HOME/cronet-rs-e2e.ini"
+          "$ANDROID_SDK_ROOT/emulator/emulator" -list-avds | grep -Fx cronet-rs-e2e
           sudo chmod 666 /dev/kvm
           "$ANDROID_SDK_ROOT/emulator/emulator" -avd cronet-rs-e2e \
             -no-window -no-audio -no-snapshot-save >android-emulator.log 2>&1 &

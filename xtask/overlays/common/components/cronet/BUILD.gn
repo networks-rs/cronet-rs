@@ -90,6 +90,9 @@ shared_library("cronet") {
 
   sources = [ "cronet_global_state_stubs.cc" ]
   configs += [ "//build/config/compiler:no_exit_time_destructors" ]
+  if (is_win) {
+    configs += [ "//build/config/clang:compiler_builtins" ]
+  }
 }
 
 # Complete archive used by cronet-rs' `static` Cargo feature. Unlike a normal
@@ -112,5 +115,10 @@ static_library("cronet_static") {
   }
 
   sources = [ "cronet_global_state_stubs.cc" ]
-  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
+  # A static_library does not inherit the final-link defaults. Expose them to
+  # the generated Cargo link manifest used by non-GN consumers.
+  configs += [
+    "//build/config:default_libs",
+    "//build/config/compiler:no_exit_time_destructors",
+  ]
 }
