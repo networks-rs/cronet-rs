@@ -667,11 +667,7 @@ fn common_gn_args(release: bool) -> Vec<String> {
 
 #[allow(clippy::too_many_lines)] // Native GN configuration and packaging form one atomic build transaction.
 fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> Result<(), String> {
-    let source = options
-        .common
-        .source_dir
-        .canonicalize()
-        .map_err(display_error("resolve the Chromium source directory"))?;
+    let source = source_path_for_external_tools(&options.common.source_dir)?;
     require_file(
         &source.join("components/cronet/native/include/cronet_c.h"),
         "run `cargo xtask sync` first",
@@ -1712,9 +1708,7 @@ fn write_cronet_overlay(
     source: &Path,
     platform: &dyn platform::PlatformBuild,
 ) -> Result<PathBuf, String> {
-    let source = source
-        .canonicalize()
-        .map_err(display_error("resolve Chromium source directory"))?;
+    let source = source_path_for_external_tools(source)?;
     let overlay = source
         .parent()
         .expect("Chromium src directory must have a parent")
@@ -1782,6 +1776,22 @@ fn write_cronet_overlay(
     overlay_files::install(&source, &overlay, overlay_files::COMMON)?;
     platform.prepare_overlay(&source, &overlay)?;
     Ok(overlay)
+}
+
+fn source_path_for_external_tools(source: &Path) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    {
+        // `canonicalize` produces a `\\?\` extended-length path on Windows.
+        // Rust can consume it, but GN interprets the prefix as `/?/` when it
+        // parses a command-line path. `absolute` keeps the ordinary drive form.
+        std::path::absolute(source).map_err(display_error("resolve Chromium source directory"))
+    }
+    #[cfg(not(windows))]
+    {
+        source
+            .canonicalize()
+            .map_err(display_error("resolve Chromium source directory"))
+    }
 }
 
 fn write_third_party_overlay(
