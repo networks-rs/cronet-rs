@@ -1,12 +1,12 @@
 use std::ffi::c_void;
 
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, sync::mpsc};
 use tokio_cronet_sys as sys;
 
 use crate::{Error, Result};
 
-/// Cronet executor whose runnables are scheduled directly onto the Tokio
-/// runtime that created the engine.
+/// Cronet executor whose runnables are scheduled in submission order onto the
+/// Tokio runtime that created the engine.
 pub(crate) struct Executor {
     raw: sys::Cronet_ExecutorPtr,
     context: *mut ExecutorContext,
@@ -14,12 +14,19 @@ pub(crate) struct Executor {
 
 struct ExecutorContext {
     runtime: Handle,
+    sender: mpsc::UnboundedSender<Runnable>,
 }
 
 impl Executor {
     pub(crate) fn new() -> Result<Self> {
         let runtime = Handle::try_current().map_err(|_| Error::TokioRuntimeRequired)?;
-        let context = Box::into_raw(Box::new(ExecutorContext { runtime }));
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Runnable>();
+        runtime.spawn(async move {
+            while let Some(runnable) = receiver.recv().await {
+                runnable.run();
+            }
+        });
+        let context = Box::into_raw(Box::new(ExecutorContext { runtime, sender }));
         // SAFETY: callback has the exact ABI expected by Cronet.
         let raw = unsafe { sys::Cronet_Executor_CreateWith(Some(execute)) };
         if raw.is_null() {
@@ -42,10 +49,10 @@ impl Executor {
     }
 }
 
-// SAFETY: all mutable state inside a Tokio Handle is synchronized. The native
+// SAFETY: Tokio handles and channel senders are synchronized. The native
 // executor is only destroyed after Cronet shutdown has stopped submitting work.
 unsafe impl Send for Executor {}
-// SAFETY: Execute only reads the Handle and Handle::spawn is thread-safe.
+// SAFETY: Execute only clones work into the thread-safe FIFO sender.
 unsafe impl Sync for Executor {}
 
 impl Drop for Executor {
@@ -106,7 +113,7 @@ unsafe extern "C" fn execute(executor: sys::Cronet_ExecutorPtr, runnable: sys::C
     let runnable = Runnable { raw: runnable };
     // SAFETY: context remains alive until engine shutdown, which waits for
     // Cronet to stop invoking this callback.
-    unsafe { &*context }
-        .runtime
-        .spawn(async move { runnable.run() });
+    // Cronet's callback state assumes executor submission order is preserved.
+    // A single receiver keeps that order while still running on Tokio.
+    let _ = unsafe { &*context }.sender.send(runnable);
 }

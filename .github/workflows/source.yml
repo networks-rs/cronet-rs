@@ -3,6 +3,8 @@ name: Cronet source builds
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
   pull_request:
 
 concurrency:
@@ -29,14 +31,16 @@ jobs:
             target: x86_64-apple-darwin
           - runner: macos-15
             target: aarch64-apple-darwin
-          - runner: windows-2025
+          # Chromium 144 supports Visual Studio through 2022. The
+          # windows-2025 label now selects the VS 2026 runner image.
+          - runner: windows-2022
             target: x86_64-pc-windows-msvc
           - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust
         shell: bash
         env:
@@ -62,6 +66,32 @@ jobs:
           test -x /usr/lib/llvm-22/bin/clang
           cargo install bindgen-cli --version 0.72.0 --locked
           echo "CRONET_CLANG_DIR=/usr/lib/llvm-22" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/lib/llvm-22/bin/clang" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-Clink-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
+      - name: Configure the Chromium checkout on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vs2022 = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise"
+          if (-not (Test-Path $vs2022)) {
+            throw "Visual Studio 2022 was not found at $vs2022"
+          }
+
+          rustup component add llvm-tools-preview
+          $rustSysroot = rustc --print sysroot
+          $rustHost = (rustc -vV | Select-String '^host: ').Line.Substring(6)
+          $rustLlvm = Join-Path $rustSysroot "lib\rustlib\$rustHost"
+          foreach ($tool in @('llvm-ar.exe', 'llvm-nm.exe', 'llvm-objcopy.exe')) {
+            $toolPath = Join-Path $rustLlvm "bin\$tool"
+            if (-not (Test-Path $toolPath)) {
+              throw "$tool was not found at $toolPath"
+            }
+          }
+
+          "CRONET_SOURCE_DIR=C:/cr/src" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "CRONET_CLANG_DIR=$($rustLlvm.Replace('\', '/'))" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "DEPOT_TOOLS_WIN_TOOLCHAIN=0" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "vs2022_install=$vs2022" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
       - name: Synchronize only the pinned Cronet source closure
         run: cargo xtask sync
       - name: Build shared and static Cronet from source
@@ -69,17 +99,21 @@ jobs:
       - name: Test static source linkage
         shell: bash
         run: |
-          export CRONET_SOURCE_DIR="$PWD/.cronet/chromium/src"
+          export CRONET_SOURCE_DIR="${CRONET_SOURCE_DIR:-$PWD/.cronet/chromium/src}"
           export CRONET_LIB_DIR="$CRONET_SOURCE_DIR/out/cronet-rs/$(printf '%s' '${{ matrix.target }}' | tr -c '[:alnum:]' '_')"
           export MACOSX_DEPLOYMENT_TARGET=12.0
           cargo test -p tokio-cronet --features static,native-tests --test e2e_local --test native_smoke -- --test-threads=1
       - name: Test shared source linkage
         shell: bash
         run: |
-          export CRONET_SOURCE_DIR="$PWD/.cronet/chromium/src"
+          export CRONET_SOURCE_DIR="${CRONET_SOURCE_DIR:-$PWD/.cronet/chromium/src}"
           export CRONET_LIB_DIR="$CRONET_SOURCE_DIR/out/cronet-rs/$(printf '%s' '${{ matrix.target }}' | tr -c '[:alnum:]' '_')"
           export MACOSX_DEPLOYMENT_TARGET=12.0
-          export PATH="$CRONET_LIB_DIR:$PATH"
+          runtime_lib_dir="$CRONET_LIB_DIR"
+          if command -v cygpath >/dev/null; then
+            runtime_lib_dir="$(cygpath --unix "$runtime_lib_dir")"
+          fi
+          export PATH="$runtime_lib_dir:$PATH"
           export LD_LIBRARY_PATH="$CRONET_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export DYLD_LIBRARY_PATH="$CRONET_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
           cargo test -p tokio-cronet --features native-tests --test e2e_local --test native_smoke -- --test-threads=1
@@ -87,7 +121,7 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash
         run: |
-          export CRONET_SOURCE_DIR="$PWD/.cronet/chromium/src"
+          export CRONET_SOURCE_DIR="${CRONET_SOURCE_DIR:-$PWD/.cronet/chromium/src}"
           export CRONET_LIB_DIR="$CRONET_SOURCE_DIR/out/cronet-rs/$(printf '%s' '${{ matrix.target }}' | tr -c '[:alnum:]' '_')"
           export LD_LIBRARY_PATH="$CRONET_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export CRONET_E2E_REQUIRE_QUIC=1
@@ -96,7 +130,7 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash
         run: |
-          export CRONET_SOURCE_DIR="$PWD/.cronet/chromium/src"
+          export CRONET_SOURCE_DIR="${CRONET_SOURCE_DIR:-$PWD/.cronet/chromium/src}"
           cargo package -p tokio-cronet-src --allow-dirty
           cargo package -p tokio-cronet-sys --allow-dirty \
             --config 'patch.crates-io.tokio-cronet-src.path="xtask"'
@@ -122,14 +156,14 @@ jobs:
           - target: i686-linux-android
             llvm-target: i686-linux-android
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust target
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add "${{ matrix.target }}"
       - name: Set up JDK for Android SDK tools
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -173,20 +207,33 @@ jobs:
         shell: bash
         run: |
           sdkmanager 'emulator' 'system-images;android-34;google_apis;x86_64'
-          echo no | avdmanager create avd --force --name cronet-rs-e2e \
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/android-avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          printf 'no\n' | avdmanager create avd --force --name cronet-rs-e2e \
             --package 'system-images;android-34;google_apis;x86_64'
+          test -f "$ANDROID_AVD_HOME/cronet-rs-e2e.ini"
+          "$ANDROID_SDK_ROOT/emulator/emulator" -list-avds | grep -Fx cronet-rs-e2e
           sudo chmod 666 /dev/kvm
           "$ANDROID_SDK_ROOT/emulator/emulator" -avd cronet-rs-e2e \
             -no-window -no-audio -no-snapshot-save >android-emulator.log 2>&1 &
           emulator_pid=$!
           trap 'kill "$emulator_pid" 2>/dev/null || true' EXIT
-          adb wait-for-device
+          if ! timeout 120 adb wait-for-device; then
+            tail -n 200 android-emulator.log
+            exit 1
+          fi
           for _ in $(seq 1 180); do
             [[ $(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r') == 1 ]] && break
-            kill -0 "$emulator_pid"
+            if ! kill -0 "$emulator_pid"; then
+              tail -n 200 android-emulator.log
+              exit 1
+            fi
             sleep 1
           done
-          [[ $(adb shell getprop sys.boot_completed | tr -d '\r') == 1 ]]
+          if [[ $(adb shell getprop sys.boot_completed | tr -d '\r') != 1 ]]; then
+            tail -n 200 android-emulator.log
+            exit 1
+          fi
           ANDROID_E2E_TARGET=x86_64-linux-android ANDROID_E2E_LINKAGE=dynamic \
             tests/mobile-e2e/android/run.sh
           ANDROID_E2E_TARGET=x86_64-linux-android ANDROID_E2E_LINKAGE=static \
@@ -209,7 +256,7 @@ jobs:
             target: x86_64-apple-ios
             runtime-e2e: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust target
         run: |
           rustup toolchain install stable --profile minimal
@@ -242,7 +289,7 @@ jobs:
     name: Rust source crate publication check
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal

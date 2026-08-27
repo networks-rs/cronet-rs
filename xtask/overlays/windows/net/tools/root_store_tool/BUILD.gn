@@ -1,0 +1,17 @@
+# Copyright 2021 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# The pinned Rust core uses f16 conversion helpers. Cronet target toolchains
+# omit compiler-rt builtins globally, so restore them for this target-toolchain
+# generator without changing Chromium's compiler defaults.
+executable("root_store_tool") {
+  sources = [ "root_store_tool.cc" ]
+  deps = [
+    "//base",
+    "//crypto",
+    "//net/cert:root_store_proto_full",
+    "//third_party/boringssl",
+  ]
+  configs += [ "//build/config/clang:compiler_builtins" ]
+}

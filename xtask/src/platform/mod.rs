@@ -9,7 +9,10 @@
 //! extra sources, are committed under `xtask/overlays/` as real files of the
 //! original type and only symlinked into the overlay.
 
-use std::{path::Path, process::Command};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use crate::{NativeLinkage, PlatformConfig};
 
@@ -37,6 +40,12 @@ pub(super) struct TargetSpec {
     pub(super) triple: &'static str,
     pub(super) gn_os: &'static str,
     pub(super) gn_cpu: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct StaticObjectSet {
+    pub(super) ninja_target: &'static str,
+    pub(super) ninja_file: &'static str,
 }
 
 impl TargetSpec {
@@ -100,6 +109,18 @@ pub(super) trait PlatformBuild {
 
     fn filter_third_party_tests(&self) -> bool {
         true
+    }
+
+    fn builds_libcxx_runtime_archives(&self) -> bool {
+        true
+    }
+
+    fn extra_static_object_sets(&self) -> &'static [StaticObjectSet] {
+        &[]
+    }
+
+    fn extra_static_archives(&self, _source: &Path) -> Result<Vec<PathBuf>, String> {
+        Ok(Vec::new())
     }
 
     fn static_archive_extension(&self) -> &'static str {

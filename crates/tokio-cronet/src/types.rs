@@ -320,7 +320,7 @@ pub(crate) unsafe fn copy_finished_info(
         sys::Cronet_RequestFinishedInfo_FINISHED_REASON_SUCCEEDED => FinishedReason::Succeeded,
         sys::Cronet_RequestFinishedInfo_FINISHED_REASON_FAILED => FinishedReason::Failed,
         sys::Cronet_RequestFinishedInfo_FINISHED_REASON_CANCELED => FinishedReason::Canceled,
-        other => FinishedReason::Unknown(other),
+        other => FinishedReason::Unknown(u32::from_ne_bytes(other.to_ne_bytes())),
     };
     // SAFETY: size and indexed values belong to the same live object.
     let annotation_count = unsafe { sys::Cronet_RequestFinishedInfo_annotations_size(raw) };

@@ -1,7 +1,9 @@
 use fs2::FileExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     io::Write,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -649,9 +651,12 @@ fn common_gn_args(release: bool) -> Vec<String> {
         "enable_device_bound_sessions=false".to_owned(),
         "enable_perfetto_trace_processor_sqlite=false".to_owned(),
         "use_platform_icu_alternatives=false".to_owned(),
-        // Standalone Cronet has no Chromium UI tree. On desktop Linux the
-        // upstream default otherwise adds //ui/base/glib to //net.
+        // Standalone Cronet has no Chromium UI tree or host development
+        // packages. Linux uses the non-GIO proxy fallback and Chromium's
+        // built-in root store.
         "use_glib=false".to_owned(),
+        "use_gio=false".to_owned(),
+        "use_nss_certs=false".to_owned(),
         // Keep the build compatible with older Xcode SDKs that predate the
         // split DarwinFoundation{1,2,3}.modulemap files.
         "use_clang_modules=false".to_owned(),
@@ -664,11 +669,7 @@ fn common_gn_args(release: bool) -> Vec<String> {
 
 #[allow(clippy::too_many_lines)] // Native GN configuration and packaging form one atomic build transaction.
 fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> Result<(), String> {
-    let source = options
-        .common
-        .source_dir
-        .canonicalize()
-        .map_err(display_error("resolve the Chromium source directory"))?;
+    let source = source_path_for_external_tools(&options.common.source_dir)?;
     require_file(
         &source.join("components/cronet/native/include/cronet_c.h"),
         "run `cargo xtask sync` first",
@@ -680,6 +681,7 @@ fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> R
     require_file(&ninja, "run `cargo xtask sync` (without --api-only) first")?;
 
     let platform_build = platform::resolve(options.target.as_deref())?;
+    let uses_external_rust = platform_build.needs_rustc_bootstrap(config);
     let out_dir = native_output_dir(&source, options.target.as_deref());
     let overlay = write_cronet_overlay(&source, platform_build.as_ref())?;
     let overlay_out_dir = native_output_dir(&overlay, options.target.as_deref());
@@ -706,7 +708,7 @@ fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> R
         .env_remove("TARGET")
         .arg("-C")
         .arg(&overlay_out_dir);
-    if platform_build.needs_rustc_bootstrap(config) {
+    if uses_external_rust {
         // Chromium's external-Rust path still emits a small set of -Z build
         // flags even when rustc_nightly_capability is false. Scope the stable
         // compiler opt-in to this native build subprocess; never mutate the
@@ -716,7 +718,9 @@ fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> R
     for linkage in options.linkage.linkages() {
         ninja_command.arg(linkage.ninja_target());
     }
-    if options.linkage.linkages().contains(&NativeLinkage::Static) {
+    if options.linkage.linkages().contains(&NativeLinkage::Static)
+        && platform_build.builds_libcxx_runtime_archives()
+    {
         // A GN static_library records these runtime archives as final-link
         // inputs without making them build dependencies. We package them into
         // Cronet's complete archive, so request fresh target-ABI copies rather
@@ -729,11 +733,31 @@ fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> R
             "obj/buildtools/third_party/libc++abi/libc++abi.{extension}"
         ));
     }
+    if options.linkage.linkages().contains(&NativeLinkage::Static) {
+        for object_set in platform_build.extra_static_object_sets() {
+            ninja_command.arg(object_set.ninja_target);
+        }
+    }
     platform_build.configure_ninja(&mut ninja_command, &overlay, options.linkage.linkages())?;
     run_command(&mut ninja_command, "compile Cronet from source")?;
     platform_build.post_build(&overlay_out_dir, &out_dir)?;
     if options.linkage.linkages().contains(&NativeLinkage::Static) {
-        bundle_static_archive(&source, &overlay_out_dir, &out_dir)?;
+        let external_clang = config
+            .clang_dir
+            .map(Path::to_owned)
+            .or_else(|| env::var_os(CLANG_DIR_ENV).map(PathBuf::from));
+        let extra_static_archives = platform_build.extra_static_archives(&source)?;
+        let extra_static_objects =
+            extra_static_objects(&overlay_out_dir, platform_build.extra_static_object_sets())?;
+        bundle_static_archive(
+            &source,
+            &overlay_out_dir,
+            &out_dir,
+            external_clang.as_deref(),
+            uses_external_rust,
+            &extra_static_archives,
+            &extra_static_objects,
+        )?;
         write_static_link_manifest(
             &gn,
             &depot_tools,
@@ -759,7 +783,15 @@ fn build_native_unlocked(options: BuildOptions, config: PlatformConfig<'_>) -> R
 }
 
 #[allow(clippy::too_many_lines)] // Archive discovery, MRI assembly, and symbol isolation are one transaction.
-fn bundle_static_archive(source: &Path, build_dir: &Path, output_dir: &Path) -> Result<(), String> {
+fn bundle_static_archive(
+    source: &Path,
+    build_dir: &Path,
+    output_dir: &Path,
+    external_clang: Option<&Path>,
+    uses_external_rust: bool,
+    extra_static_archives: &[PathBuf],
+    extra_static_objects: &[PathBuf],
+) -> Result<(), String> {
     let raw_name = native_static_archive_name("cronet_static_raw");
     let bundled_name = native_static_archive_name("cronet_static");
     let raw_archive = build_dir.join(raw_name);
@@ -790,18 +822,30 @@ fn bundle_static_archive(source: &Path, build_dir: &Path, output_dir: &Path) -> 
         }
     }
     for relative in rust_archives.split_ascii_whitespace() {
-        if is_chromium_rust_allocator_shim(relative) {
-            // tokio-cronet-src is a Rust native dependency, so the final Cargo
-            // artifact supplies these lang-item allocator symbols. Bundling
-            // Chromium's executable-oriented shim as well causes duplicate
-            // `__rust_alloc*` definitions on strict ELF linkers such as OHOS
-            // lld. Other Chromium Rust rlibs, including the allocation-error
-            // C++ bridge, remain part of the complete archive.
+        if uses_external_rust && is_chromium_rust_allocator_shim(relative) {
+            // An external Rust sysroot is also used by the final Cargo
+            // artifact, so bundling Chromium's allocator shim would define
+            // the same allocator ABI twice.
             continue;
         }
         let archive = build_dir.join(relative);
         require_file(&archive, "the GN Rust dependency must be built")?;
         archives.push(archive);
+    }
+    let extra_archive_dir = build_dir.join("obj/cronet_rs_runtime");
+    for archive in extra_static_archives {
+        require_file(archive, "synchronize the target compiler runtime")?;
+        fs::create_dir_all(&extra_archive_dir)
+            .map_err(display_error("create the Cronet runtime archive directory"))?;
+        let file_name = archive.file_name().ok_or_else(|| {
+            format!(
+                "compiler runtime path {} has no file name",
+                archive.display()
+            )
+        })?;
+        let staged = extra_archive_dir.join(file_name);
+        fs::copy(archive, &staged).map_err(display_error("stage a compiler runtime archive"))?;
+        archives.push(staged);
     }
 
     let temporary_name = format!(".{bundled_name}.{}", std::process::id());
@@ -809,13 +853,7 @@ fn bundle_static_archive(source: &Path, build_dir: &Path, output_dir: &Path) -> 
     if temporary.exists() {
         fs::remove_file(&temporary).map_err(display_error("replace static archive temporary"))?;
     }
-    let llvm_ar = source
-        .join("third_party/llvm-build/Release+Asserts/bin")
-        .join(if cfg!(windows) {
-            "llvm-ar.exe"
-        } else {
-            "llvm-ar"
-        });
+    let llvm_ar = llvm_tool(source, external_clang, "llvm-ar");
     require_file(&llvm_ar, "run `cargo xtask sync` first")?;
     let mut child = Command::new(&llvm_ar)
         .arg("-M")
@@ -841,6 +879,17 @@ fn bundle_static_archive(source: &Path, build_dir: &Path, output_dir: &Path) -> 
             writeln!(input, "addlib {}", relative.display())
                 .map_err(display_error("write llvm-ar MRI command"))?;
         }
+        for object in extra_static_objects {
+            let relative = object.strip_prefix(build_dir).map_err(|_| {
+                format!(
+                    "static object {} is outside {}",
+                    object.display(),
+                    build_dir.display()
+                )
+            })?;
+            writeln!(input, "addmod {}", relative.display())
+                .map_err(display_error("write llvm-ar MRI command"))?;
+        }
         writeln!(input, "save\nend").map_err(display_error("write llvm-ar MRI command"))?;
     }
     let status = child
@@ -856,15 +905,24 @@ fn bundle_static_archive(source: &Path, build_dir: &Path, output_dir: &Path) -> 
     // A Rust application supplies its own panic personality. Chromium's
     // private Rust standard library exports the same C symbol from inside the
     // complete native archive; give that internal copy a private namespace so
-    // the two toolchains can coexist in one final Rust link.
-    let llvm_objcopy = source
-        .join("third_party/llvm-build/Release+Asserts/bin")
-        .join(if cfg!(windows) {
-            "llvm-objcopy.exe"
-        } else {
-            "llvm-objcopy"
-        });
+    // the two toolchains can coexist in one final Rust link. LLVM objcopy
+    // cannot rewrite a COFF archive containing Rust metadata, so on Windows
+    // rewrite only the object that defines the symbol and replace that member.
+    let llvm_objcopy = llvm_tool(source, external_clang, "llvm-objcopy");
     require_file(&llvm_objcopy, "run `cargo xtask sync` first")?;
+    if cfg!(windows) {
+        let llvm_nm = llvm_tool(source, external_clang, "llvm-nm");
+        require_file(&llvm_nm, "run `cargo xtask sync` first")?;
+        redefine_archive_member_symbol(
+            &llvm_ar,
+            &llvm_nm,
+            &llvm_objcopy,
+            &bundled,
+            "rust_eh_personality",
+            "cronet_rs_chromium_rust_eh_personality",
+        )?;
+        return Ok(());
+    }
     check_status(
         Command::new(llvm_objcopy)
             .arg("--redefine-sym=rust_eh_personality=cronet_rs_chromium_rust_eh_personality")
@@ -879,6 +937,153 @@ fn bundle_static_archive(source: &Path, build_dir: &Path, output_dir: &Path) -> 
     )
 }
 
+fn extra_static_objects(
+    build_dir: &Path,
+    object_sets: &[platform::StaticObjectSet],
+) -> Result<Vec<PathBuf>, String> {
+    let mut objects = Vec::new();
+    for object_set in object_sets {
+        let ninja_file = build_dir.join(object_set.ninja_file);
+        let ninja = fs::read_to_string(&ninja_file)
+            .map_err(display_error("read the extra static object set"))?;
+        let outputs = ninja_object_outputs(&ninja);
+        if outputs.is_empty() {
+            return Err(format!(
+                "{} does not contain any object outputs",
+                ninja_file.display()
+            ));
+        }
+        for output in outputs {
+            let object = build_dir.join(output);
+            require_file(&object, "build the extra static object set")?;
+            objects.push(object);
+        }
+    }
+    Ok(objects)
+}
+
+fn ninja_object_outputs(ninja: &str) -> Vec<&str> {
+    ninja
+        .lines()
+        .filter_map(|line| line.strip_prefix("build "))
+        .filter_map(|line| line.split_once(':'))
+        .flat_map(|(outputs, _)| outputs.split_ascii_whitespace())
+        .filter(|output| {
+            Path::new(output)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("obj"))
+        })
+        .collect()
+}
+
+fn redefine_archive_member_symbol(
+    llvm_ar: &Path,
+    llvm_nm: &Path,
+    llvm_objcopy: &Path,
+    archive: &Path,
+    symbol: &str,
+    replacement: &str,
+) -> Result<(), String> {
+    let archive_dir = archive
+        .parent()
+        .ok_or_else(|| format!("archive {} has no parent directory", archive.display()))?;
+    let archive_name = archive
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| format!("archive {} has no UTF-8 file name", archive.display()))?;
+    let nm = Command::new(llvm_nm)
+        .arg("--print-file-name")
+        .arg("--defined-only")
+        .arg(archive_name)
+        .current_dir(archive_dir)
+        .output()
+        .map_err(display_error("inspect the static archive symbols"))?;
+    check_status(nm.status, "inspect the static archive symbols")?;
+    let nm_stdout = String::from_utf8(nm.stdout)
+        .map_err(|error| format!("llvm-nm produced non-UTF-8 output: {error}"))?;
+    let member = archive_member_defining_symbol(&nm_stdout, archive_name, symbol)?;
+    if Path::new(&member).file_name() != Some(OsStr::new(&member)) {
+        return Err(format!(
+            "archive symbol `{symbol}` is in unsafe member `{member}`"
+        ));
+    }
+
+    let staging = archive_dir.join(format!(".cronet-rs-personality.{}", std::process::id()));
+    if staging.exists() {
+        fs::remove_dir_all(&staging).map_err(display_error(
+            "replace the personality object staging directory",
+        ))?;
+    }
+    fs::create_dir_all(&staging).map_err(display_error(
+        "create the personality object staging directory",
+    ))?;
+    check_status(
+        Command::new(llvm_ar)
+            .arg("x")
+            .arg(archive_name)
+            .arg(&member)
+            .arg("--output")
+            .arg(&staging)
+            .current_dir(archive_dir)
+            .status()
+            .map_err(display_error("extract the Rust personality object"))?,
+        "extract the Rust personality object",
+    )?;
+    let object = staging.join(&member);
+    require_file(&object, "extract the Rust personality object")?;
+    check_status(
+        Command::new(llvm_objcopy)
+            .arg(format!("--redefine-sym={symbol}={replacement}"))
+            .arg(&object)
+            .status()
+            .map_err(display_error("rewrite the Rust personality object"))?,
+        "rewrite the Rust personality object",
+    )?;
+    check_status(
+        Command::new(llvm_ar)
+            .arg("r")
+            .arg(archive_name)
+            .arg(&object)
+            .current_dir(archive_dir)
+            .status()
+            .map_err(display_error("replace the Rust personality archive member"))?,
+        "replace the Rust personality archive member",
+    )?;
+    fs::remove_dir_all(staging).map_err(display_error(
+        "remove the personality object staging directory",
+    ))
+}
+
+fn archive_member_defining_symbol(
+    nm_stdout: &str,
+    archive_name: &str,
+    symbol: &str,
+) -> Result<String, String> {
+    let prefix = format!("{archive_name}:");
+    let members = nm_stdout
+        .lines()
+        .filter(|line| {
+            let mut fields = line.split_ascii_whitespace().rev();
+            fields.next() == Some(symbol)
+                && fields
+                    .next()
+                    .is_some_and(|kind| !kind.eq_ignore_ascii_case("u"))
+        })
+        .filter_map(|line| {
+            line.strip_prefix(&prefix)
+                .and_then(|rest| rest.split_once(": "))
+                .map(|(member, _)| member.to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+    if members.len() != 1 {
+        return Err(format!(
+            "expected `{symbol}` in one member of {archive_name}, found {}",
+            members.len()
+        ));
+    }
+    Ok(members.into_iter().next().unwrap())
+}
+
 fn is_chromium_rust_allocator_shim(path: &str) -> bool {
     let path = path.replace('\\', "/");
     path.rsplit_once('/').is_some_and(|(directory, file)| {
@@ -888,6 +1093,42 @@ fn is_chromium_rust_allocator_shim(path: &str) -> bool {
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("rlib"))
     })
+}
+
+fn llvm_tool(source: &Path, external_clang: Option<&Path>, name: &str) -> PathBuf {
+    let search_path = env::var_os("PATH");
+    llvm_tool_with_search_path(source, external_clang, name, search_path.as_deref())
+}
+
+fn llvm_tool_with_search_path(
+    source: &Path,
+    external_clang: Option<&Path>,
+    name: &str,
+    search_path: Option<&OsStr>,
+) -> PathBuf {
+    let binary = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    if let Some(directory) = external_clang {
+        return directory.join("bin").join(binary);
+    }
+    let bundled = source
+        .join("third_party/llvm-build/Release+Asserts/bin")
+        .join(&binary);
+    if bundled.is_file() {
+        return bundled;
+    }
+    // Chromium's Windows compiler package omits some archive utilities.
+    // A host LLVM installation can operate on the same target archives.
+    search_path
+        .and_then(|path| {
+            env::split_paths(path)
+                .map(|directory| directory.join(&binary))
+                .find(|candidate| candidate.is_file())
+        })
+        .unwrap_or(bundled)
 }
 
 fn native_static_archive_name(stem: &str) -> String {
@@ -917,6 +1158,7 @@ fn write_static_link_manifest(
         command_stdout(&mut command, "inspect Cronet static link requirements")
     };
     let libraries = describe("libs")?;
+    let linker_flags = describe("ldflags")?;
     let target_macos = target.map_or(cfg!(target_os = "macos"), |target| target.contains("apple"));
     let frameworks = if target_macos {
         describe("frameworks")?
@@ -956,6 +1198,19 @@ fn write_static_link_manifest(
             manifest.push('\n');
         }
     }
+    for flag in linker_flags
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        // Chromium selects the MSVC C++ runtime through /DEFAULTLIB in its
+        // runtime config, so it is absent from `gn desc ... libs`.
+        if let Some(library) = msvc_default_library(flag) {
+            manifest.push_str("lib=");
+            manifest.push_str(library);
+            manifest.push('\n');
+        }
+    }
     for framework in frameworks
         .lines()
         .map(str::trim)
@@ -970,6 +1225,11 @@ fn write_static_link_manifest(
         manifest.as_bytes(),
         "write Cronet static link manifest",
     )
+}
+
+fn msvc_default_library(flag: &str) -> Option<&str> {
+    let (option, library) = flag.split_once(':')?;
+    (option.eq_ignore_ascii_case("/DEFAULTLIB") && !library.is_empty()).then_some(library)
 }
 
 fn vendor_source(args: &[std::ffi::OsString]) -> Result<(), String> {
@@ -1681,7 +1941,8 @@ fn write_gclient(chromium_root: &Path, target: Option<&str>) -> Result<(), Strin
          \x20   'checkout_wpr_archives': False,\n\
          \x20 }},\n\
          }}]\n\
-         target_os = {target_os}\n"
+         target_os = {target_os}\n\
+         cache_dir = None\n"
     );
     fs::write(chromium_root.join(".gclient"), contents).map_err(display_error("write .gclient"))
 }
@@ -1690,9 +1951,7 @@ fn write_cronet_overlay(
     source: &Path,
     platform: &dyn platform::PlatformBuild,
 ) -> Result<PathBuf, String> {
-    let source = source
-        .canonicalize()
-        .map_err(display_error("resolve Chromium source directory"))?;
+    let source = source_path_for_external_tools(source)?;
     let overlay = source
         .parent()
         .expect("Chromium src directory must have a parent")
@@ -1762,6 +2021,22 @@ fn write_cronet_overlay(
     Ok(overlay)
 }
 
+fn source_path_for_external_tools(source: &Path) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    {
+        // `canonicalize` produces a `\\?\` extended-length path on Windows.
+        // Rust can consume it, but GN interprets the prefix as `/?/` when it
+        // parses a command-line path. `absolute` keeps the ordinary drive form.
+        std::path::absolute(source).map_err(display_error("resolve Chromium source directory"))
+    }
+    #[cfg(not(windows))]
+    {
+        source
+            .canonicalize()
+            .map_err(display_error("resolve Chromium source directory"))
+    }
+}
+
 fn write_third_party_overlay(
     source: &Path,
     overlay: &Path,
@@ -1814,11 +2089,11 @@ fn write_third_party_overlay(
     if root_build.is_file() {
         let build = fs::read_to_string(root_build)
             .map_err(display_error("read upstream third_party/BUILD.gn"))?;
-        fs::write(
-            overlay_third_party.join("BUILD.gn"),
+        write_generated_overlay_file(
+            &overlay_third_party.join("BUILD.gn"),
             remove_testonly_gn_blocks(build),
-        )
-        .map_err(display_error("write test-filtered third_party/BUILD.gn"))?;
+            "write test-filtered third_party/BUILD.gn",
+        )?;
     }
     Ok(())
 }
@@ -1945,8 +2220,11 @@ pub(crate) fn write_test_filtered_directory(
         }
         build = build.replacen(UNUSED_TRACE_PROCESSOR_TYPE, "", 1);
     }
-    fs::write(overlay.join("BUILD.gn"), build)
-        .map_err(display_error("write test-filtered BUILD.gn"))
+    write_generated_overlay_file(
+        &overlay.join("BUILD.gn"),
+        build,
+        "write test-filtered BUILD.gn",
+    )
 }
 
 fn write_testing_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
@@ -1965,8 +2243,11 @@ fn write_testing_overlay(source: &Path, overlay: &Path) -> Result<(), String> {
     let build = fs::read_to_string(source_testing.join("BUILD.gn"))
         .map_err(display_error("read upstream testing/BUILD.gn"))?;
     let build = remove_named_gn_blocks(build, "group", "run_perf_test")?;
-    fs::write(overlay_testing.join("BUILD.gn"), build)
-        .map_err(display_error("write Cronet-only testing/BUILD.gn"))
+    write_generated_overlay_file(
+        &overlay_testing.join("BUILD.gn"),
+        build,
+        "write Cronet-only testing/BUILD.gn",
+    )
 }
 
 fn write_build_overlay(source: &Path, overlay: &Path, filter_tests: bool) -> Result<(), String> {
@@ -1988,8 +2269,11 @@ fn write_build_overlay(source: &Path, overlay: &Path, filter_tests: bool) -> Res
     let build = fs::read_to_string(source_build.join("BUILD.gn"))
         .map_err(display_error("read upstream build/BUILD.gn"))?;
     let build = remove_named_gn_blocks(build, "group", "gold_common_pytype")?;
-    fs::write(overlay_build.join("BUILD.gn"), build)
-        .map_err(display_error("write Cronet-only build/BUILD.gn"))?;
+    write_generated_overlay_file(
+        &overlay_build.join("BUILD.gn"),
+        build,
+        "write Cronet-only build/BUILD.gn",
+    )?;
     ensure_symlink(&source_build.join("config"), &overlay_build.join("config"))?;
     write_test_filtered_directory(
         &source_build.join("android"),
@@ -2091,7 +2375,7 @@ fn write_cronet_component_overlay(
 pub(crate) fn replace_generated_link_with_directory(path: &Path) -> Result<(), String> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() {
-            fs::remove_file(path).map_err(display_error("replace Cronet overlay link"))?;
+            remove_overlay_symlink(path)?;
         } else if metadata.is_dir() {
             return Ok(());
         } else {
@@ -2106,7 +2390,9 @@ pub(crate) fn replace_generated_link_with_directory(path: &Path) -> Result<(), S
 
 pub(crate) fn replace_generated_link_with_file(path: &Path) -> Result<(), String> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || metadata.is_file() {
+        if metadata.file_type().is_symlink() {
+            remove_overlay_symlink(path)?;
+        } else if metadata.is_file() {
             fs::remove_file(path).map_err(display_error("replace Cronet overlay link"))?;
         } else {
             return Err(format!(
@@ -2116,6 +2402,33 @@ pub(crate) fn replace_generated_link_with_file(path: &Path) -> Result<(), String
         }
     }
     Ok(())
+}
+
+fn write_generated_overlay_file(
+    path: &Path,
+    contents: impl AsRef<[u8]>,
+    action: &'static str,
+) -> Result<(), String> {
+    replace_generated_link_with_file(path)?;
+    fs::write(path, contents).map_err(display_error(action))
+}
+
+fn remove_overlay_symlink(path: &Path) -> Result<(), String> {
+    let result = fs::remove_file(path).or_else(|error| {
+        if path.is_dir() {
+            // Windows requires directory symlinks to be removed with the
+            // directory API. This removes only the link, never its target.
+            fs::remove_dir(path)
+        } else {
+            Err(error)
+        }
+    });
+    result.map_err(|error| {
+        format!(
+            "failed to replace Cronet overlay link {}: {error}",
+            path.display()
+        )
+    })
 }
 
 pub(crate) fn write_if_changed(
@@ -2225,6 +2538,13 @@ fn remove_testonly_gn_blocks(mut source: String) -> String {
         "target",
         "test",
     ];
+
+    // `str::lines` removes both bytes from CRLF, while the offset scan below
+    // advances one byte for each line ending. Normalize Windows checkouts so
+    // calculated byte offsets continue to address the original GN tokens.
+    if source.contains("\r\n") {
+        source = source.replace("\r\n", "\n");
+    }
 
     loop {
         let candidate = source
@@ -2358,7 +2678,7 @@ pub(crate) fn ensure_symlink(target: &Path, link: &Path) -> Result<(), String> {
             if fs::read_link(link).is_ok_and(|existing| existing == target) {
                 return Ok(());
             }
-            fs::remove_file(link).map_err(display_error("replace Cronet overlay link"))?;
+            remove_overlay_symlink(link)?;
             return create_symlink(target, link)
                 .map_err(display_error("create Cronet GN overlay link"));
         }
@@ -2445,6 +2765,7 @@ const CRONET_DEPENDENCY_RULES: &[&str] = &[
     "src/third_party/lzma_sdk/bin/*",
     "src/third_party/llvm-build/Release+Asserts",
     "src/third_party/llvm-libc/src",
+    "src/third_party/nasm",
     "src/third_party/ninja",
     "src/third_party/perfetto",
     "src/third_party/re2/src",
@@ -2640,6 +2961,7 @@ const BUILD_SPARSE_PATTERNS: &str = r"/*
 /third_party/metrics_proto/
 /third_party/mockito/
 /third_party/modp_b64/
+/third_party/nasm/
 /third_party/perfetto/
 /third_party/protobuf/
 /third_party/re2/
@@ -2678,6 +3000,12 @@ const BUILD_SPARSE_PATTERNS: &str = r"/*
 /third_party/rust/termcolor/
 /third_party/rust/unicode_ident/
 /third_party/rust/unicode_width/
+/third_party/rust/winapi_util/
+/third_party/rust/windows_aarch64_msvc/
+/third_party/rust/windows_i686_msvc/
+/third_party/rust/windows_sys/
+/third_party/rust/windows_targets/
+/third_party/rust/windows_x86_64_msvc/
 /third_party/simdutf/
 /third_party/sqlite4java/
 /third_party/turbine/
@@ -2737,22 +3065,6 @@ pub mod android {
     }
 
     #[test]
-    fn excludes_only_the_chromium_rust_allocator_shim_from_static_bundles() {
-        assert!(is_chromium_rust_allocator_shim(
-            "obj/build/rust/allocator/liballocator_6ead5877.rlib"
-        ));
-        assert!(is_chromium_rust_allocator_shim(
-            r"obj\build\rust\allocator\liballocator_6ead5877.rlib"
-        ));
-        assert!(!is_chromium_rust_allocator_shim(
-            "obj/build/rust/allocator/liballoc_error_handler_impl_ffi.rlib"
-        ));
-        assert!(!is_chromium_rust_allocator_shim(
-            "obj/other/liballocator_6ead5877.rlib"
-        ));
-    }
-
-    #[test]
     fn committed_overlay_files_are_typed_wrappers() {
         let rustfmt = include_str!("../wrappers/rustfmt");
         assert!(rustfmt.contains("rustfmt.real"));
@@ -2769,6 +3081,14 @@ pub mod android {
         assert!(ashmem.contains("ashmem_upstream.cc"));
         let resolver = include_str!("../overlays/ohos/net/dns/public/scoped_res_state.cc");
         assert!(resolver.contains("scoped_res_state_upstream.cc"));
+        let windows = include_str!("../overlays/windows/build/vs_toolchain.py");
+        assert!(windows.contains("vs_toolchain_upstream.py"));
+        assert!(windows.contains("_CopyDebugger"));
+        let windows = include_str!("../overlays/windows/net/tools/root_store_tool/BUILD.gn");
+        assert!(windows.contains("root_store_tool"));
+        assert!(windows.contains("//build/config/clang:compiler_builtins"));
+        let cronet = include_str!("../overlays/common/components/cronet/BUILD.gn");
+        assert!(cronet.contains("//build/config:default_libs"));
         let wrapper = include_str!("../../crates/tokio-cronet-sys/native/cronet_rs_bind.cc");
         assert!(wrapper.contains("Cronet_RS_Engine_StartWithParams"));
         assert!(wrapper.contains("CommandLine::Init"));
@@ -2779,6 +3099,7 @@ pub mod android {
         assert!(cronet_dependency_allowed("src/third_party/boringssl/src"));
         assert!(cronet_dependency_allowed("src/net/third_party/quiche/src"));
         assert!(cronet_dependency_allowed("src/third_party/ninja"));
+        assert!(cronet_dependency_allowed("src/third_party/nasm"));
         assert!(cronet_dependency_allowed("src/third_party/lss"));
         assert!(cronet_dependency_allowed("src/third_party/junit/src"));
         assert!(!cronet_dependency_allowed(
@@ -2836,13 +3157,61 @@ pub mod android {
 
         assert!(!android.filter_third_party_tests());
         assert!(macos.filter_third_party_tests());
+        assert!(!windows.builds_libcxx_runtime_archives());
+        assert!(macos.builds_libcxx_runtime_archives());
+        assert_eq!(
+            windows.extra_static_object_sets(),
+            &[platform::StaticObjectSet {
+                ninja_target: "libc++",
+                ninja_file: "obj/buildtools/third_party/libc++/libc++.ninja",
+            }]
+        );
+        assert!(macos.extra_static_object_sets().is_empty());
         assert_eq!(windows.static_archive_extension(), "lib");
         assert_eq!(macos.static_archive_extension(), "a");
+        assert!(
+            windows
+                .gn_args(
+                    Path::new("source"),
+                    Path::new("overlay"),
+                    PlatformConfig::default(),
+                )
+                .unwrap()
+                .contains(&"use_partition_alloc=true".to_owned())
+        );
 
         let android_root = include_str!("../overlays/android/BUILD.gn");
         assert!(android_root.contains("cronet_rs_android_support_java"));
         let host_root = include_str!("../overlays/common/BUILD.gn");
         assert!(!host_root.contains("cronet_rs_android_support_java"));
+    }
+
+    #[test]
+    fn extracts_only_coff_objects_from_ninja_outputs() {
+        let ninja = r"
+build obj/libc++/algorithm.obj: cxx ../../algorithm.cpp
+build obj/libc++/support.obj obj/libc++/support.json: cxx ../../support.cpp
+build obj/libc++.stamp: stamp obj/libc++/algorithm.obj obj/libc++/support.obj
+build libc++: phony obj/libc++.stamp
+";
+        assert_eq!(
+            ninja_object_outputs(ninja),
+            ["obj/libc++/algorithm.obj", "obj/libc++/support.obj"]
+        );
+    }
+
+    #[test]
+    fn extracts_msvc_default_libraries_from_gn_linker_flags() {
+        assert_eq!(
+            msvc_default_library("/DEFAULTLIB:libcpmt.lib"),
+            Some("libcpmt.lib")
+        );
+        assert_eq!(
+            msvc_default_library("/defaultlib:msvcprt.lib"),
+            Some("msvcprt.lib")
+        );
+        assert_eq!(msvc_default_library("/MACHINE:X64"), None);
+        assert_eq!(msvc_default_library("/DEFAULTLIB:"), None);
     }
 
     #[test]
@@ -2866,14 +3235,11 @@ pub mod android {
     }
 
     #[test]
-    fn standalone_build_disables_the_chromium_ui_glib_dependency() {
+    fn standalone_build_avoids_linux_host_development_packages() {
         let arguments = common_gn_args(true);
-        assert!(
-            arguments
-                .iter()
-                .any(|argument| argument == "use_glib=false")
-        );
-        assert!(!arguments.iter().any(|argument| argument == "use_glib=true"));
+        for argument in ["use_glib=false", "use_gio=false", "use_nss_certs=false"] {
+            assert!(arguments.iter().any(|candidate| candidate == argument));
+        }
     }
 
     #[test]
@@ -2892,6 +3258,79 @@ pub mod android {
             "linux",
             "aarch64",
             "x86_64-unknown-linux-gnu"
+        ));
+    }
+
+    #[test]
+    fn static_packaging_uses_the_configured_llvm_tools() {
+        let binary = if cfg!(windows) {
+            "llvm-ar.exe"
+        } else {
+            "llvm-ar"
+        };
+        assert_eq!(
+            llvm_tool(
+                Path::new("chromium"),
+                Some(Path::new("native-llvm")),
+                "llvm-ar"
+            ),
+            Path::new("native-llvm/bin").join(binary)
+        );
+
+        let root = env::temp_dir().join(format!(
+            "tokio-cronet-src-llvm-tool-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let host_bin = root.join("host/bin");
+        fs::create_dir_all(&host_bin).unwrap();
+        let host_tool = host_bin.join(binary);
+        fs::write(&host_tool, []).unwrap();
+        let search_path = env::join_paths([&host_bin]).unwrap();
+        let bundled_tool = root
+            .join("chromium/third_party/llvm-build/Release+Asserts/bin")
+            .join(binary);
+        fs::create_dir_all(bundled_tool.parent().unwrap()).unwrap();
+        fs::write(&bundled_tool, []).unwrap();
+        assert_eq!(
+            llvm_tool_with_search_path(&root.join("chromium"), None, "llvm-ar", Some(&search_path)),
+            bundled_tool
+        );
+        fs::remove_file(&bundled_tool).unwrap();
+        assert_eq!(
+            llvm_tool_with_search_path(&root.join("chromium"), None, "llvm-ar", Some(&search_path)),
+            host_tool
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn finds_the_coff_archive_member_that_defines_the_rust_personality() {
+        let nm = concat!(
+            "cronet_static.lib:other.rcgu.o: 00000000 T unrelated\n",
+            "cronet_static.lib:std.8a6d8cd86c7d29b2-cgu.0.rcgu.o: ",
+            "00000000 T rust_eh_personality\n",
+            "cronet_static.lib:caller.rcgu.o:          U rust_eh_personality\n",
+        );
+        assert_eq!(
+            archive_member_defining_symbol(nm, "cronet_static.lib", "rust_eh_personality").unwrap(),
+            "std.8a6d8cd86c7d29b2-cgu.0.rcgu.o"
+        );
+    }
+
+    #[test]
+    fn external_rust_static_packaging_excludes_only_the_allocator_shim() {
+        assert!(is_chromium_rust_allocator_shim(
+            "obj/build/rust/allocator/liballocator_6ead5877.rlib"
+        ));
+        assert!(is_chromium_rust_allocator_shim(
+            r"obj\build\rust\allocator\liballocator_6ead5877.rlib"
+        ));
+        assert!(!is_chromium_rust_allocator_shim(
+            "obj/build/rust/allocator/liballoc_error_handler_impl_ffi.rlib"
+        ));
+        assert!(!is_chromium_rust_allocator_shim(
+            "obj/other/liballocator_6ead5877.rlib"
         ));
     }
 
@@ -2925,6 +3364,35 @@ pub mod android {
                 (archive, directory.to_owned())
             );
         }
+    }
+
+    #[test]
+    fn maps_windows_compiler_runtimes_from_the_bundled_clang() {
+        let root = env::temp_dir().join(format!(
+            "tokio-cronet-src-windows-runtime-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let runtime = root.join("third_party/llvm-build/Release+Asserts/lib/clang/22/lib/windows");
+        fs::create_dir_all(&runtime).unwrap();
+        for archive in [
+            "clang_rt.builtins-x86_64.lib",
+            "clang_rt.builtins-aarch64.lib",
+        ] {
+            fs::write(runtime.join(archive), []).unwrap();
+        }
+
+        for (target, archive) in [
+            ("x86_64-pc-windows-msvc", "clang_rt.builtins-x86_64.lib"),
+            ("aarch64-pc-windows-msvc", "clang_rt.builtins-aarch64.lib"),
+        ] {
+            let platform = platform::resolve(Some(target)).unwrap();
+            assert_eq!(
+                platform.extra_static_archives(&root).unwrap(),
+                [runtime.join(archive)]
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3056,10 +3524,12 @@ component("test_support") {
   deps = [ ":runtime" ]
 }
 "#;
-        let filtered = remove_testonly_gn_blocks(source.to_owned());
-        assert!(filtered.contains("component(\"runtime\")"));
-        assert!(filtered.contains("${root}/runtime.cc"));
-        assert!(!filtered.contains("test_support"));
+        for source in [source.to_owned(), source.replace('\n', "\r\n")] {
+            let filtered = remove_testonly_gn_blocks(source);
+            assert!(filtered.contains("component(\"runtime\")"));
+            assert!(filtered.contains("${root}/runtime.cc"));
+            assert!(!filtered.contains("test_support"));
+        }
     }
 
     #[test]
@@ -3077,5 +3547,63 @@ group("remove") {
         let filtered = remove_named_gn_blocks(source.to_owned(), "group", "remove").unwrap();
         assert!(filtered.contains("group(\"keep\")"));
         assert!(!filtered.contains("group(\"remove\")"));
+    }
+
+    #[test]
+    fn materializes_a_directory_over_an_overlay_symlink() {
+        let root = env::temp_dir().join(format!(
+            "cronet-rs-overlay-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target = root.join("target");
+        let link = root.join("link");
+        fs::create_dir_all(&target).unwrap();
+        create_symlink(&target, &link).unwrap();
+
+        replace_generated_link_with_directory(&link).unwrap();
+
+        let metadata = fs::symlink_metadata(&link).unwrap();
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn generated_build_files_do_not_overwrite_committed_overlay_targets() {
+        let root = env::temp_dir().join(format!(
+            "tokio-cronet-src-generated-overlay-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        let overlay = root.join("overlay");
+        let committed = root.join("committed.gn");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&overlay).unwrap();
+        fs::write(source.join("BUILD.gn"), "group(\"source\") {}\n").unwrap();
+        fs::write(&committed, "group(\"committed\") {}\n").unwrap();
+        ensure_symlink(&committed, &overlay.join("BUILD.gn")).unwrap();
+
+        write_test_filtered_directory(&source, &overlay, false).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&committed).unwrap(),
+            "group(\"committed\") {}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(overlay.join("BUILD.gn")).unwrap(),
+            "group(\"source\") {}\n"
+        );
+        assert!(
+            !fs::symlink_metadata(overlay.join("BUILD.gn"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

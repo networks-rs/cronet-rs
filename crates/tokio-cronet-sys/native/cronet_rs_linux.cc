@@ -1,18 +1,21 @@
-// Link-time adapters for APIs that Chromium's Linux graph expects but the
-// OpenHarmony Native SDK does not provide. Keeping these definitions beside
-// Cronet avoids patching the corresponding upstream translation units.
+// Link-time adapters for standalone targets using Chromium's Linux graph.
+// Keeping these definitions beside Cronet avoids patching upstream sources.
 
-#include <ostream>
 #include <utility>
 
-#include "base/debug/stack_trace.h"
 #include "base/nix/xdg_util.h"
 #include "net/cert/internal/system_trust_store.h"
 #include "net/cert/internal/trust_store_chrome.h"
 
+#if defined(CRONET_TARGET_OHOS)
+#include <ostream>
+
+#include "base/debug/stack_trace.h"
+#endif
+
 namespace base {
 
-#if !defined(HAVE_BACKTRACE)
+#if defined(CRONET_TARGET_OHOS) && !defined(HAVE_BACKTRACE)
 void debug::StackTrace::OutputToStreamWithPrefixImpl(
     std::ostream* output,
     cstring_view prefix) const {

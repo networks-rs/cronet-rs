@@ -36,7 +36,7 @@ fn main() {
     println!("cargo:rerun-if-changed=native/cronet_rs_android_jni_onload.cc");
     println!("cargo:rerun-if-changed=native/cronet_rs_android_static_support.cc");
     println!("cargo:rerun-if-changed=native/cronet_rs_bind.cc");
-    println!("cargo:rerun-if-changed=native/cronet_rs_ohos.cc");
+    println!("cargo:rerun-if-changed=native/cronet_rs_linux.cc");
     println!("cargo:rerun-if-changed=native/cronet_rs_websocket.cc");
 
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
@@ -171,7 +171,10 @@ fn generate_bindings(manifest_dir: &Path, root: &Path) {
         .header(manifest_dir.join("wrapper.h").display().to_string())
         // Upstream's generated header uses C++ `bool` without including
         // <stdbool.h>; Cronet itself consumes this public C ABI as C++.
-        .clang_args(["-x", "c++", "-std=c++17"])
+        // These ABI-only headers need stddef/stdint but no host libc. Asking
+        // Clang for its freestanding definitions keeps Android cross builds
+        // from accidentally entering the Linux runner's multiarch headers.
+        .clang_args(["-x", "c++", "-std=c++17", "-ffreestanding"])
         .clang_arg(format!("-I{}", include.display()))
         .clang_arg(format!("-I{}", grpc_include.display()))
         .clang_arg(format!("-I{}", generated.display()))

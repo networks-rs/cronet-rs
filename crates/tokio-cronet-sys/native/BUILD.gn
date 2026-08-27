@@ -2,6 +2,8 @@
 # Sources are committed in tokio-cronet-sys and only symlinked into the
 # generated Cronet-only GN overlay. Upstream Chromium C/C++ is not patched.
 
+import("//crypto/features.gni")
+
 source_set("cronet_rs_native") {
   sources = [
     "cronet_rs_bind.cc",
@@ -11,9 +13,9 @@ source_set("cronet_rs_native") {
   if (is_android) {
     sources += [ "cronet_rs_android_jni_onload.cc" ]
   }
-  if (defined(cronet_target_ohos) && cronet_target_ohos) {
+  if (is_linux && !use_nss_certs) {
     sources += [
-      "cronet_rs_ohos.cc",
+      "cronet_rs_linux.cc",
       "//net/cert/test_root_certs_builtin.cc",
     ]
   }

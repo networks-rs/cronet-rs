@@ -262,7 +262,7 @@ impl NetworkErrorCode {
             sys::Cronet_Error_ERROR_CODE_ERROR_ADDRESS_UNREACHABLE => Self::AddressUnreachable,
             sys::Cronet_Error_ERROR_CODE_ERROR_QUIC_PROTOCOL_FAILED => Self::QuicProtocolFailed,
             sys::Cronet_Error_ERROR_CODE_ERROR_OTHER => Self::Other,
-            other => Self::Unknown(other),
+            other => Self::Unknown(u32::from_ne_bytes(other.to_ne_bytes())),
         }
     }
 }
